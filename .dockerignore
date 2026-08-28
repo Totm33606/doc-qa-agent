@@ -1,0 +1,15 @@
+.venv/
+.git/
+.github/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+__pycache__/
+*.pyc
+.coverage
+htmlcov/
+data/chroma/
+eval/eval_report.json
+tests/
+.env
+.env.local

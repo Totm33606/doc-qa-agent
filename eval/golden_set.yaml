@@ -1,0 +1,356 @@
+# Golden evaluation set for DocQA-Agent.
+#
+# Every question/expected_answer/expected_sources triple below was written
+# by hand against the actual corpus in data/raw/ (fetched from fastapi/fastapi
+# at the pinned tag in data/raw/manifest.json), not from memory — each
+# `expected_sources` entry is a corpus-relative file that a correct
+# retrieval should surface for that question. `expected_answer` is a human
+# reference answer, short enough to check by eye against the cited source
+# file. See eval/run_eval.py for how this set is used to score both
+# retrieval (precision@k / recall@k / MRR) and generation (groundedness).
+
+- id: q01
+  category: path-params
+  question: |-
+    In FastAPI, why must a path operation like `/users/me` be declared before `/users/{user_id}`?
+  expected_answer: |-
+    Because path operations are matched in the order they are declared; if `/users/{user_id}` came first, a request to `/users/me` would match it instead, with FastAPI thinking `me` is the value of the `user_id` parameter.
+  expected_sources:
+    - tutorial/path-params.md
+
+- id: q02
+  category: path-params
+  question: |-
+    How do you restrict a FastAPI path parameter to one of a fixed set of predefined values?
+  expected_answer: |-
+    Create a subclass of both `str` and Python's `Enum` with the allowed values as class attributes, then use that enum class as the type annotation for the path parameter.
+  expected_sources:
+    - tutorial/path-params.md
+
+- id: q03
+  category: path-params
+  question: |-
+    How do you declare a FastAPI path parameter that can itself contain a path with slashes in it, like `/files/home/johndoe/myfile.txt`?
+  expected_answer: |-
+    Use Starlette's `:path` convertor in the path declaration, e.g. `@app.get("/files/{file_path:path}")`, which tells FastAPI the parameter should match any path, slashes included.
+  expected_sources:
+    - tutorial/path-params.md
+
+- id: q04
+  category: query-params
+  question: |-
+    How do you add a maximum-length validation to an optional FastAPI query parameter using the recommended `Annotated` style?
+  expected_answer: |-
+    Import `Query` from fastapi and `Annotated` from typing, then declare the parameter as `q: Annotated[str | None, Query(max_length=50)] = None`.
+  expected_sources:
+    - tutorial/query-params-str-validations.md
+
+- id: q05
+  category: path-params
+  question: |-
+    How do you attach metadata like a title to a FastAPI path parameter?
+  expected_answer: |-
+    Import `Path` from fastapi and wrap the parameter's type with `Annotated`, e.g. `item_id: Annotated[int, Path(title="The ID of the item to get")]` — `Path` accepts the same kind of arguments as `Query`.
+  expected_sources:
+    - tutorial/path-params-numeric-validations.md
+
+- id: q06
+  category: dependencies
+  question: |-
+    What is the minimum requirement for something to be usable as a FastAPI dependency?
+  expected_answer: |-
+    It just needs to be a "callable" — anything Python can call like a function. This includes classes (instantiating a class uses the same call syntax), not only plain functions.
+  expected_sources:
+    - tutorial/dependencies/index.md
+    - tutorial/dependencies/classes-as-dependencies.md
+
+- id: q07
+  category: dependencies
+  question: |-
+    If the same dependency function is required by two different sub-dependencies within a single request, how many times does FastAPI actually call it?
+  expected_answer: |-
+    Only once per request by default — FastAPI caches the returned value and reuses it for every dependant that needs it in that request. Set `use_cache=False` in `Depends()` on a specific dependency to force it to be re-executed instead.
+  expected_sources:
+    - tutorial/dependencies/sub-dependencies.md
+
+- id: q08
+  category: dependencies
+  question: |-
+    In a FastAPI dependency that uses `yield`, when does the code after the `yield` statement run by default?
+  expected_answer: |-
+    After the response has already been sent to the client (the default `scope="request"`) — the code before and including `yield` runs before the response is generated, and the code after `yield` runs as cleanup once the path operation is done. Passing `scope="function"` to `Depends()` instead closes the dependency right after the path operation function returns, before the response is sent.
+  expected_sources:
+    - tutorial/dependencies/dependencies-with-yield.md
+
+- id: q09
+  category: dependencies
+  question: |-
+    If you catch an exception inside a FastAPI dependency with `yield` using an `except` block but don't re-raise it, what happens?
+  expected_answer: |-
+    FastAPI won't be able to notice there was an exception — the client still gets an HTTP 500 error, but the server logs show no indication of what went wrong. You should always re-raise (or raise a new exception like `HTTPException`) unless you're fully handling it.
+  expected_sources:
+    - tutorial/dependencies/dependencies-with-yield.md
+
+- id: q10
+  category: security
+  question: |-
+    What does FastAPI's `OAuth2PasswordBearer` dependency do if a request has no `Authorization` header, or the header doesn't contain a Bearer token?
+  expected_answer: |-
+    It automatically responds with an HTTP 401 Unauthorized error directly — the path operation function only runs once a `Bearer <token>` value is actually present, so the function itself doesn't need to check that the token exists.
+  expected_sources:
+    - tutorial/security/first-steps.md
+
+- id: q11
+  category: security
+  question: |-
+    In FastAPI's OAuth2 password-flow tutorial, how must the client send the `username` and `password` to the token endpoint?
+  expected_answer: |-
+    As form data, not JSON, via a dependency on `OAuth2PasswordRequestForm` — the OAuth2 spec requires the fields to be named exactly `username` and `password`.
+  expected_sources:
+    - tutorial/security/simple-oauth2.md
+
+- id: q12
+  category: security
+  question: |-
+    In OAuth2 terms as used by FastAPI's security utilities, what is a "scope"?
+  expected_answer: |-
+    Just a string declaring a specific permission (e.g. `users:read`). The client sends a single `scope` form field containing multiple space-separated scope strings when requesting a token.
+  expected_sources:
+    - tutorial/security/simple-oauth2.md
+    - advanced/security/oauth2-scopes.md
+
+- id: q13
+  category: middleware
+  question: |-
+    If a FastAPI app registers two HTTP middlewares with `app.add_middleware(MiddlewareA)` then `app.add_middleware(MiddlewareB)`, what is the request-path execution order?
+  expected_answer: |-
+    MiddlewareB runs first on the request path (it's the outermost, since it was added last), then MiddlewareA, then the route. The order reverses on the response path: route, then MiddlewareA, then MiddlewareB.
+  expected_sources:
+    - tutorial/middleware.md
+
+- id: q14
+  category: cors
+  question: |-
+    Why can't you set `allow_origins=["*"]` together with `allow_credentials=True` in FastAPI's `CORSMiddleware`?
+  expected_answer: |-
+    None of `allow_origins`, `allow_methods` or `allow_headers` can be a wildcard `"*"` when `allow_credentials=True` — browsers require them to be explicitly specified once credentials (cookies, Authorization headers) are allowed.
+  expected_sources:
+    - tutorial/cors.md
+
+- id: q15
+  category: response-model
+  question: |-
+    Besides validating and documenting the response, what security-relevant thing does declaring a response type (or `response_model`) do in FastAPI?
+  expected_answer: |-
+    It limits and filters the output data to exactly what's defined in the response type — so even if your function accidentally returns extra fields (e.g. from a database object), those extra fields get stripped out of the response instead of leaking to the client.
+  expected_sources:
+    - tutorial/response-model.md
+
+- id: q16
+  category: response-model
+  question: |-
+    When would you use the `response_model` parameter on a FastAPI path operation decorator instead of just annotating the function's return type?
+  expected_answer: |-
+    When the function needs to return something that doesn't match the declared response shape directly (e.g. a plain dict or a database object) but you still want it validated, documented and filtered as a given Pydantic model — `response_model` lets you declare a different output shape than the function's own return type annotation.
+  expected_sources:
+    - tutorial/response-model.md
+
+- id: q17
+  category: error-handling
+  question: |-
+    How do you make a FastAPI endpoint return an HTTP 404 error when a requested item doesn't exist?
+  expected_answer: |-
+    Import `HTTPException` from fastapi and `raise HTTPException(status_code=404, detail="Item not found")`. Since it's a Python exception you raise it rather than returning it; raising it immediately stops the rest of the path operation function and sends that error response.
+  expected_sources:
+    - tutorial/handling-errors.md
+
+- id: q18
+  category: error-handling
+  question: |-
+    How do you register a handler in FastAPI for a custom exception class, so raising it anywhere in the app always produces the same custom response?
+  expected_answer: |-
+    Use the `@app.exception_handler()` decorator on a handler function, passing the custom exception class — the same exception-handling mechanism FastAPI reuses from Starlette.
+  expected_sources:
+    - tutorial/handling-errors.md
+
+- id: q19
+  category: background-tasks
+  question: |-
+    In FastAPI, when does code added via `BackgroundTasks.add_task()` actually run?
+  expected_answer: |-
+    After the response has already been returned to the client — it's meant for operations the client doesn't need to wait for, like sending a notification email or processing an uploaded file.
+  expected_sources:
+    - tutorial/background-tasks.md
+
+- id: q20
+  category: background-tasks
+  question: |-
+    Where does FastAPI's `BackgroundTasks` class actually come from, and why does FastAPI re-export it under that exact name?
+  expected_answer: |-
+    It comes directly from Starlette (`starlette.background`). FastAPI re-exports it as `BackgroundTasks` (with the "s") specifically so you don't accidentally import Starlette's separate `BackgroundTask` (without the "s") by mistake.
+  expected_sources:
+    - tutorial/background-tasks.md
+
+- id: q21
+  category: testing
+  question: |-
+    When writing pytest tests for a FastAPI app with the synchronous `TestClient`, should the test functions be `def` or `async def`?
+  expected_answer: |-
+    Normal `def`, not `async def` — `TestClient` handles calling the underlying async application for you, so tests stay plain synchronous pytest functions with plain (non-awaited) calls.
+  expected_sources:
+    - tutorial/testing.md
+
+- id: q22
+  category: testing
+  question: |-
+    How do you override a FastAPI dependency with a mock/test version only for the duration of your tests?
+  expected_answer: |-
+    Set `app.dependency_overrides[original_dependency_function] = override_function` — a dict keyed by the original dependency callable — and reset it afterwards with `app.dependency_overrides = {}`.
+  expected_sources:
+    - advanced/testing-dependencies.md
+
+- id: q23
+  category: testing
+  question: |-
+    If a FastAPI test needs to call other async functions itself (e.g. an async database call), why can't you keep using the plain `TestClient` inside an `async def` test function?
+  expected_answer: |-
+    `TestClient`'s mechanism for driving the underlying async application only works from a synchronous test function. Inside an async test function you instead use HTTPX's `AsyncClient` with `ASGITransport(app=app)` directly, together with a plugin like `pytest.mark.anyio`.
+  expected_sources:
+    - advanced/async-tests.md
+
+- id: q24
+  category: static-files
+  question: |-
+    How do you serve a directory of static files from a FastAPI app at the `/static` URL path?
+  expected_answer: |-
+    Import `StaticFiles` from `fastapi.staticfiles` and mount it: `app.mount("/static", StaticFiles(directory="static"), name="static")`.
+  expected_sources:
+    - tutorial/static-files.md
+
+- id: q25
+  category: sql-databases
+  question: |-
+    In FastAPI's SQL databases tutorial, how do you declare a SQLModel class that is both a Pydantic-style model and an actual database table?
+  expected_answer: |-
+    Inherit from `SQLModel` and pass `table=True` to the class, e.g. `class Hero(SQLModel, table=True):` — without `table=True` it behaves as a plain Pydantic-style model, not a table.
+  expected_sources:
+    - tutorial/sql-databases.md
+
+- id: q26
+  category: lifespan
+  question: |-
+    How do you run setup code once before a FastAPI app starts accepting requests, and cleanup code once after it stops — e.g. to load a shared ML model?
+  expected_answer: |-
+    Define an async function decorated with `@asynccontextmanager` that does the startup work, then `yield`s, then does the shutdown/cleanup work, and pass that function to `FastAPI(lifespan=...)`.
+  expected_sources:
+    - advanced/events.md
+
+- id: q27
+  category: settings
+  question: |-
+    How do you read typed, validated application settings from environment variables in FastAPI, using Pydantic?
+  expected_answer: |-
+    Install `pydantic-settings` and create a subclass of `BaseSettings` (from `pydantic_settings`) with typed class attributes and optional defaults, then instantiate it once, e.g. `settings = Settings()` — it reads and validates values from environment variables automatically.
+  expected_sources:
+    - advanced/settings.md
+
+- id: q28
+  category: sub-applications
+  question: |-
+    What happens to the OpenAPI schema and interactive docs of a FastAPI application that is mounted as a sub-application inside another FastAPI app?
+  expected_answer: |-
+    They stay completely independent — a mounted sub-application is treated as a fully separate application, so the main application's OpenAPI/docs won't include anything from the mounted one, unlike using an `APIRouter`, which does get merged in.
+  expected_sources:
+    - advanced/sub-applications.md
+    - tutorial/static-files.md
+
+- id: q29
+  category: files
+  question: |-
+    What's the difference between declaring an uploaded file as `Annotated[bytes, File()]` versus as `UploadFile` in a FastAPI endpoint?
+  expected_answer: |-
+    Both receive the uploaded file as form data, but `bytes` loads the whole file into memory as raw bytes, while `UploadFile` gives you a file-like object (with attributes like `.filename`) that FastAPI can handle more efficiently for larger files.
+  expected_sources:
+    - tutorial/request-files.md
+
+- id: q30
+  category: dependencies
+  question: |-
+    What must you install in addition to FastAPI to receive OAuth2 password-flow form data or uploaded files, if you didn't install the `fastapi[standard]` extras?
+  expected_answer: |-
+    `python-multipart` — both OAuth2's password flow and file uploads send their data as form data, which FastAPI needs `python-multipart` to parse. It's only included automatically when installing the `standard`/`all` extras.
+  expected_sources:
+    - tutorial/security/first-steps.md
+    - tutorial/request-files.md
+
+- id: q31
+  category: response-status-code
+  question: |-
+    How do you make a FastAPI `POST` endpoint return HTTP 201 Created instead of the default 200?
+  expected_answer: |-
+    Pass `status_code=201` to the path operation decorator, e.g. `@app.post("/items/", status_code=201)` — `status_code` is a parameter of the decorator (`get`/`post`/etc.), not of the path operation function itself.
+  expected_sources:
+    - tutorial/response-status-code.md
+
+- id: q32
+  category: security
+  question: |-
+    How do you protect a FastAPI endpoint with HTTP Basic Auth?
+  expected_answer: |-
+    Create a `security = HTTPBasic()` scheme and declare a dependency on it typed as `HTTPBasicCredentials`, e.g. `credentials: Annotated[HTTPBasicCredentials, Depends(security)]`. FastAPI returns an HTTP 401 with a `WWW-Authenticate: Basic` header automatically if no credentials are sent, which makes the browser show its built-in login prompt.
+  expected_sources:
+    - advanced/security/http-basic-auth.md
+
+- id: q33
+  category: security
+  question: |-
+    Why does FastAPI's HTTP Basic Auth example use `secrets.compare_digest()` instead of a plain `==` comparison to check the username and password?
+  expected_answer: |-
+    `secrets.compare_digest()` is a constant-time comparison, which protects against timing attacks — a plain `==` comparison can leak information about how many leading characters matched based on how long the comparison takes.
+  expected_sources:
+    - advanced/security/http-basic-auth.md
+
+- id: q34
+  category: custom-response
+  question: |-
+    By default, if you don't declare a `response_class`, what format does FastAPI use for responses?
+  expected_answer: |-
+    JSON — FastAPI uses `JSONResponse` by default. To return something else (HTML, a file, a stream, etc.) you set the `response_class` parameter on the path operation decorator to the specific `Response` subclass you want.
+  expected_sources:
+    - advanced/custom-response.md
+
+- id: q35
+  category: response-headers
+  question: |-
+    How do you add a custom response header in a FastAPI endpoint without constructing the `Response` object yourself?
+  expected_answer: |-
+    Declare a `response: Response` parameter in the path operation function and set `response.headers["X-My-Header"] = "value"` on that temporary object — FastAPI merges those headers (and cookies/status code) into the final response, still applying any declared `response_model` filtering to the returned value.
+  expected_sources:
+    - advanced/response-headers.md
+
+- id: q36
+  category: security
+  question: |-
+    What does declaring OAuth2 scopes in FastAPI actually get you, and what does it not do automatically?
+  expected_answer: |-
+    It lets you declare fine-grained permission requirements (like `users:read` or `users:write`) as part of the OpenAPI security scheme, so the interactive docs show and let users request specific scopes — but FastAPI doesn't enforce those permissions for you, your own code still has to check them.
+  expected_sources:
+    - advanced/security/oauth2-scopes.md
+
+- id: q37
+  category: bigger-applications
+  question: |-
+    In FastAPI's recommended multi-file project layout, what makes a directory like `app/routers/` importable as a Python subpackage?
+  expected_answer: |-
+    The presence of an (empty) `__init__.py` file inside it — that's what turns a plain directory into a Python package/subpackage other modules can import from, e.g. `from app.routers import items`.
+  expected_sources:
+    - tutorial/bigger-applications.md
+
+- id: q38
+  category: request-body
+  question: |-
+    How do you declare that a FastAPI endpoint expects a JSON request body matching a specific structure?
+  expected_answer: |-
+    Define a class that inherits from Pydantic's `BaseModel` with typed attributes, then use that class as the type annotation of a parameter in your path operation function — FastAPI reads the request body as JSON and validates/converts it against that model automatically.
+  expected_sources:
+    - tutorial/body.md

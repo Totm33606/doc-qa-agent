@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.5.x"
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: |
+          uv venv --python 3.11
+          uv pip install -e ".[dev]"
+
+      - name: Lint (ruff)
+        run: uv run ruff check src tests eval
+
+      - name: Format check (ruff)
+        run: uv run ruff format --check src tests eval
+
+      - name: Type check (mypy)
+        run: uv run mypy src eval
+
+      - name: Build vector store (needed for the retrieval-integration test)
+        run: uv run python -m ingestion.build
+
+      - name: Run tests with coverage
+        run: uv run pytest
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: .coverage

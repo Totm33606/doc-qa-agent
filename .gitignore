@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Vector store (derived from data/raw/ via `ingestion.build` — not committed, it's large
+# and fully reproducible; the corpus it's built from, data/raw/, IS committed)
+data/chroma/
+
+# Eval output (regenerate via `eval.run_eval`)
+eval/eval_report.json
+
+# Env
+.env
+.env.local
+uv.lock
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
