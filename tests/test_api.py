@@ -91,6 +91,21 @@ def test_ask_rejects_invalid_top_k(hermetic_app: object) -> None:
     assert response.status_code == 422
 
 
+def test_ask_returns_502_on_unexpected_generation_failure(
+    hermetic_app: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _RaisingChatModel:
+        def invoke(self, messages: object) -> object:
+            raise ValueError("simulated LLM failure")
+
+    monkeypatch.setattr("generation.generate.build_llm", lambda: _RaisingChatModel())
+
+    with TestClient(hermetic_app) as client:  # type: ignore[arg-type]
+        response = client.post("/ask", json={"question": "Why does path order matter?"})
+
+    assert response.status_code == 502
+
+
 def test_ask_before_startup_returns_503() -> None:
     import api.app as app_module
 

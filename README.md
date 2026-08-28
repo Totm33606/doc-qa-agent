@@ -407,7 +407,7 @@ for generation) — not rounded to look better:
 | Precision@5 | 0.5632 | **0.5789** |
 | Recall@5 | **0.9737** | 0.9342 |
 | MRR | **0.9079** | 0.8662 |
-| Mean groundedness | 0.7234 | **0.7303** |
+| Mean groundedness | 0.7895 | **0.8114** |
 
 **In plain terms:** both strategies find *a* correct source for nearly
 every question (recall is high for both) — the real difference is
@@ -436,15 +436,32 @@ file-level agreement is the fair common ground for comparing them.
 (`generation/generate.py::compute_groundedness`): the answer is split at
 each `[source: N]` marker; the text before a marker is one "claim
 segment", counted as grounded only if `N` is a valid index into the
-passages actually retrieved. This is a **syntactic proxy**, not a
-semantic entailment check — it catches "the model cited nothing" and "the
-model cited something it wasn't shown" (real hallucination signals), but
-it does *not* verify that the cited passage actually *says* what the
-claim asserts, and it can't detect a claim smuggled into the middle of a
-multi-sentence segment that only gets a citation at the very end (that
-whole segment is scored as one unit). A cheaper, real limitation worth
-being upfront about, in the spirit of not rounding the numbers above to
-look flattering either.
+passages actually retrieved and the segment contains actual claim text
+(not just leftover punctuation — see below). This is a **syntactic
+proxy**, not a semantic entailment check — it catches "the model cited
+nothing" and "the model cited something it wasn't shown" (real
+hallucination signals), but it does *not* verify that the cited passage
+actually *says* what the claim asserts, and it can't detect a claim
+smuggled into the middle of a multi-sentence segment that only gets a
+citation at the very end (that whole segment is scored as one unit). A
+cheaper, real limitation worth being upfront about, in the spirit of not
+rounding the numbers above to look flattering either.
+
+**A real bug this caught in its own scoring, found from a live `/ask`
+response**: an earlier version counted *any* leftover non-whitespace text
+after the last citation as an uncited claim. `qwen2.5:7b-instruct`
+sometimes writes `"...claim [source: 3]."` — period *after* the bracket,
+the mirror image of the more common `"...claim. [source: 3]"` — which left
+a lone trailing `"."` that isn't empty, so it silently counted as a whole
+extra ungrounded "claim" on top of an answer that was, in substance, fully
+cited. The fix requires a segment to contain at least one word character
+to count as a real claim at all (`_HAS_WORD_RE` in `generate.py`), applied
+uniformly to every segment, not just the trailing one — a lone citation
+with no real claim text before it doesn't inflate the denominator either.
+This alone moved mean groundedness from 0.72/0.73 to 0.79/0.81 across the
+two strategies on the same 38 questions — the retrieval numbers above were
+never affected, only the generation-side metric, which is exactly the
+kind of thing a hand-checked golden set is supposed to surface.
 
 ```bash
 uv run python -m eval.run_eval                    # full report: retrieval + generation
@@ -508,22 +525,36 @@ resolves each one back to the exact file and section it came from, and
 ## Testing & quality gates
 
 ```bash
-uv run pytest          # 57 tests, hermetic except one file (see below)
+uv run pytest          # 82 tests, hermetic except one file (see below)
 uv run ruff check src tests eval
 uv run ruff format --check src tests eval
-uv run mypy src eval
+uv run mypy src tests eval
 ```
 
 **Hermetic by design**: every test except `tests/test_integration.py`
 uses `FakeEmbedder` (deterministic, hash-based) and `FakeChatModel`
 (canned response) instead of the real BGE model or a real LLM — no
 network, no Ollama, no API key needed to run the suite, and it runs in
-seconds. `test_integration.py` is the one place the real
-`BAAI/bge-small-en-v1.5` model gets exercised (marked `integration`, still
-run by CI by default — downloading a free, ~130MB local model isn't the
-kind of external-service dependency the rest of the suite avoids); one
+seconds. The one exception to "no network" too is `test_fetch_network.py`,
+which exercises `ingestion/fetch.py`'s HTTP-calling code with
+`httpx.MockTransport` — httpx's own offline-testing mechanism, no real
+request, no extra dependency. `test_integration.py` is the one place the
+real `BAAI/bge-small-en-v1.5` model gets exercised (marked `integration`,
+still run by CI by default — downloading a free, ~130MB local model isn't
+the kind of external-service dependency the rest of the suite avoids); one
 test in that file additionally checks the real, already-built
 `data/chroma` store and is skipped gracefully if it hasn't been built yet.
+
+**Coverage: 99%** (`--cov=src --cov=eval`, up from an initial 80% that
+only measured `src/` — `eval/run_eval.py` had tests from the start but
+wasn't in the measured scope at all). The 6 statements still uncovered
+are `main(): app()` / `if __name__ == "__main__":` in the three CLI
+entrypoints (`ingestion/build.py`, `ingestion/fetch.py`,
+`eval/run_eval.py`) — calling them would invoke Typer against pytest's own
+`sys.argv`, which tests nothing real; every module's actual logic
+(`run()`, `build_collection()`, `_inline_snippets()`, `build_llm()`'s
+provider branching, the `/ask` error paths, `compute_groundedness`'s
+edge cases) is exercised directly instead.
 
 CI (`.github/workflows/ci.yml`) lints, type-checks, **builds the real
 vector store** (`ingestion.build`, so the integration test has something

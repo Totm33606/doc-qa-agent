@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from common.schemas import RetrievedPassage
 from generation.generate import compute_groundedness, extract_citations, generate_answer
 from tests.conftest import FakeChatModel
@@ -75,6 +77,40 @@ def test_compute_groundedness_empty_answer_is_zero() -> None:
     assert compute_groundedness("   ", PASSAGES) == 0.0
 
 
+def test_compute_groundedness_punctuation_only_answer_is_zero() -> None:
+    """Non-empty but wordless (no citations, no real claim text either) — distinct code
+    path from the empty-string case: `grounded_flags` ends up empty after processing."""
+    assert compute_groundedness("...!!!", PASSAGES) == 0.0
+
+
+def test_compute_groundedness_trailing_period_after_last_citation_is_not_a_claim() -> None:
+    """Regression: '[source: N].' (period *after* the bracket) must not add a phantom
+    uncited segment — a lone '.' left over after the last marker isn't a real claim.
+    """
+    answer = "First claim [source: 1]. Second claim [source: 2]."
+    assert compute_groundedness(answer, PASSAGES) == 1.0
+
+
+def test_compute_groundedness_punctuation_only_segment_is_not_a_claim() -> None:
+    """A citation with no real claim text before it (just leftover punctuation from the
+    previous marker) shouldn't inflate the denominator either."""
+    answer = "Real claim [source: 1]. [source: 2]"
+    assert compute_groundedness(answer, PASSAGES) == 1.0
+
+
+def test_generate_answer_falls_back_to_build_llm_when_none_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Covers the `llm or build_llm()` branch — every other test injects an explicit llm."""
+    fake = FakeChatModel("An answer. [source: 1]")
+    monkeypatch.setattr("generation.generate.build_llm", lambda: fake)
+
+    response = generate_answer("A question", PASSAGES, llm=None)
+
+    assert len(fake.invocations) == 1
+    assert response.groundedness_score == 1.0
+
+
 def test_generate_answer_with_no_passages_short_circuits() -> None:
     llm = FakeChatModel("this should never be used")
     response = generate_answer("What is FastAPI?", [], llm=llm)
@@ -103,4 +139,6 @@ def test_generate_answer_passes_system_and_human_messages() -> None:
 
     [messages] = llm.invocations
     assert len(messages) == 2
-    assert messages[1].content.startswith("Question: A question")
+    content = messages[1].content
+    assert isinstance(content, str)
+    assert content.startswith("Question: A question")

@@ -34,6 +34,7 @@ from generation.llm import build_llm
 from generation.prompt import SYSTEM_PROMPT, build_user_message
 
 _CITATION_RE = re.compile(r"\[source:\s*(\d+)\]")
+_HAS_WORD_RE = re.compile(r"\w")
 
 _NO_PASSAGES_ANSWER = (
     "I don't have any retrieved documentation passages to answer this question from."
@@ -78,6 +79,15 @@ def compute_groundedness(answer: str, passages: list[RetrievedPassage]) -> float
     within `passages` — an out-of-range index means the model cited a
     passage it was never shown, which is exactly the hallucination case
     this is meant to catch.
+
+    A segment only counts as a real claim if it contains at least one word
+    character (`_HAS_WORD_RE`), not just punctuation/whitespace. Without
+    this, a citation styled "...claim [source: 3]." — period *after* the
+    bracket, as opposed to the more common "...claim. [source: 3]" — leaves
+    a lone trailing "." after the last marker, which `text[cursor:].strip()`
+    doesn't consider empty; that stray period was getting counted as its
+    own uncited "claim", silently penalizing an answer that was, in fact,
+    fully cited.
     """
     text = answer.strip()
     if not text:
@@ -88,13 +98,13 @@ def compute_groundedness(answer: str, passages: list[RetrievedPassage]) -> float
     cursor = 0
     for match in _CITATION_RE.finditer(text):
         segment = text[cursor : match.start()].strip()
-        if segment:
+        if _HAS_WORD_RE.search(segment):
             index = int(match.group(1))
             grounded_flags.append(1 <= index <= n_passages)
         cursor = match.end()
 
     trailing = text[cursor:].strip()
-    if trailing:
+    if _HAS_WORD_RE.search(trailing):
         grounded_flags.append(False)
 
     if not grounded_flags:

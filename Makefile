@@ -25,7 +25,7 @@ lint:
 	uv run ruff check src tests eval
 
 typecheck:
-	uv run mypy src eval
+	uv run mypy src tests eval
 
 fmt:
 	uv run ruff format src tests eval
