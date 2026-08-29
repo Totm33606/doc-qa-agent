@@ -27,8 +27,11 @@ prior knowledge of FastAPI, and never a guess.
 Rules:
 1. After every factual claim, add a citation in the exact form [source: N], \
 where N is the number of the passage (shown as "[N] ...") that claim came \
-from. A sentence with no matching passage gets no citation. Never invent a \
-number outside the passages actually shown to you.
+from. Place the citation at the END of the sentence it supports, after the \
+final period — never at the start of a sentence. Correct: "FastAPI uses \
+Pydantic for validation. [source: 2]" Wrong: "[source: 2] FastAPI uses \
+Pydantic for validation." A sentence with no matching passage gets no \
+citation. Never invent a number outside the passages actually shown to you.
 2. If the passages don't contain enough information to answer the question, \
 say so explicitly instead of guessing — do not fill gaps from general \
 knowledge about FastAPI.
@@ -45,6 +48,6 @@ def build_user_message(question: str, passages: list[RetrievedPassage]) -> str:
     context = "\n\n".join(_passage_block(i + 1, p) for i, p in enumerate(passages))
     return (
         f"Question: {question}\n\n"
-        f'Context passages (cite using the exact "source_file#section" shown '
-        f"above each one):\n\n{context}"
+        f"Context passages (cite using [source: N], where N is the number "
+        f"shown before each one):\n\n{context}"
     )

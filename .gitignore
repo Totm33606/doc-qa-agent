@@ -15,6 +15,7 @@ data/chroma/
 
 # Eval output (regenerate via `eval.run_eval`)
 eval/eval_report.json
+eval/eval_details.md
 
 # Env
 .env

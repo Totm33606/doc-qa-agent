@@ -1,25 +1,24 @@
 """Generate a grounded answer from retrieved passages, then score how grounded it actually is.
 
-`compute_groundedness` is the hallucination check: it doesn't ask a second
-LLM to judge the answer (slower, another source of error) — it splits the
-answer at each `[source: N]` marker and checks whether the claim text
-immediately before that marker is backed by a valid, in-range citation.
+`compute_groundedness` splits the answer at each citation marker and
+checks whether the claim right before each marker cites valid, in-range
+passages. A citation only counts if it trails the claim it supports — one
+with nothing real before it (leading a claim instead of following one)
+counts for nothing, matching what the prompt asks for. Three format
+liberties are tolerated, all found by reading real generated output: bare
+`[N]` as well as `[source: N]` (the model sometimes echoes the `[N]
+file#section` notation shown in its own context instead of the requested
+form), and one marker citing several passages at once, `[source: 2,5]`
+(a segment behind one of these only counts as grounded if *every* index
+in it is valid — one real citation bundled with one fabricated one is
+still citing a passage that was never shown).
 
-An earlier version split the answer into grammatical sentences first and
-then looked for a citation *inside* each sentence. That systematically
-undercounted: a citation conventionally trails right after the sentence's
-closing period ("Claim. [source: 1]"), which puts it in the *next*
-sentence-split's text, not the one it actually supports — so a
-fully-and-correctly-cited two-sentence answer scored 0.67, not 1.0. It
-also broke down entirely on multi-paragraph answers ending in a code
-block, since a citation after a fenced code block has no sentence-ending
-punctuation to attach to at all. Splitting on the citation markers
-themselves sidesteps both problems: whatever text sits between two
-markers (or between the last marker and the end of the answer) is treated
-as one claim segment, and that segment counts as grounded only if the
-marker following it is a valid index. This is a syntactic proxy for "is
-this traceable to a source", not a semantic entailment check — see the
-README's evaluation section for what it does and doesn't catch.
+This is a syntactic proxy for "is this traceable to a source", not a
+semantic entailment check — it can't verify the cited passage actually
+*says* what the claim asserts. See the README's Evaluation section for
+what this heuristic does and doesn't catch, and for the design history
+(why leading citations, and sentence-based splitting, were tried and
+dropped).
 """
 
 from __future__ import annotations
@@ -33,8 +32,14 @@ from common.schemas import AskResponse, Citation, RetrievedPassage
 from generation.llm import build_llm
 from generation.prompt import SYSTEM_PROMPT, build_user_message
 
-_CITATION_RE = re.compile(r"\[source:\s*(\d+)\]")
+_CITATION_RE = re.compile(r"\[(?:source:\s*)?(\d+(?:\s*,\s*\d+)*)\]")
 _HAS_WORD_RE = re.compile(r"\w")
+
+
+def _indices(match: re.Match[str]) -> list[int]:
+    """Parse a citation marker's digits into indices — usually one, e.g. `2, 5` for `[source: 2,5]`."""
+    return [int(n) for n in match.group(1).split(",")]
+
 
 _NO_PASSAGES_ANSWER = (
     "I don't have any retrieved documentation passages to answer this question from."
@@ -48,46 +53,39 @@ class ChatModel(Protocol):
 
 
 def extract_citations(answer: str, passages: list[RetrievedPassage]) -> list[Citation]:
-    """Pull every `[source: N]` marker out of `answer` and resolve N to a real passage.
+    """Pull every citation marker out of `answer` and resolve each index to a real passage.
 
-    `matched_passage` is False when N is out of range (0, too large, or
-    otherwise not one of the passages actually shown to the model) — a
-    citation to a passage number that was never shown is exactly the
-    hallucination case this is meant to catch.
+    A single marker citing several passages at once (`[source: 2,5]`)
+    yields one `Citation` per index. `matched_passage` is False when the
+    index is out of range (0, too large, or otherwise not one of the
+    passages actually shown to the model) — a citation to a passage
+    number that was never shown is exactly the hallucination case this is
+    meant to catch.
     """
     citations = []
     for match in _CITATION_RE.finditer(answer):
-        index = int(match.group(1))
-        in_range = 1 <= index <= len(passages)
-        passage = passages[index - 1] if in_range else None
-        citations.append(
-            Citation(
-                source_file=passage.source_file if passage else f"<invalid index {index}>",
-                section=passage.section if passage else "<invalid index>",
-                matched_passage=in_range,
+        for index in _indices(match):
+            in_range = 1 <= index <= len(passages)
+            passage = passages[index - 1] if in_range else None
+            citations.append(
+                Citation(
+                    source_file=passage.source_file if passage else f"<invalid index {index}>",
+                    section=passage.section if passage else "<invalid index>",
+                    matched_passage=in_range,
+                )
             )
-        )
     return citations
 
 
 def compute_groundedness(answer: str, passages: list[RetrievedPassage]) -> float:
     """Fraction of the answer's claim segments (text between citation markers) that are grounded.
 
-    Each `[source: N]` marker closes out the claim segment before it; any
-    leftover text after the last marker is one more, uncited, segment. A
-    segment counts as grounded only if its marker's index actually falls
-    within `passages` — an out-of-range index means the model cited a
-    passage it was never shown, which is exactly the hallucination case
-    this is meant to catch.
-
-    A segment only counts as a real claim if it contains at least one word
-    character (`_HAS_WORD_RE`), not just punctuation/whitespace. Without
-    this, a citation styled "...claim [source: 3]." — period *after* the
-    bracket, as opposed to the more common "...claim. [source: 3]" — leaves
-    a lone trailing "." after the last marker, which `text[cursor:].strip()`
-    doesn't consider empty; that stray period was getting counted as its
-    own uncited "claim", silently penalizing an answer that was, in fact,
-    fully cited.
+    Each citation marker closes out the claim segment before it; leftover
+    text after the last marker is one more, uncited, segment. A segment
+    only counts as a real claim if it has at least one word character
+    (`_HAS_WORD_RE`) — otherwise a citation styled "claim [3]." (period
+    *after* the bracket) would leave a lone "." that isn't blank but also
+    isn't a claim, and get counted as an extra uncited segment.
     """
     text = answer.strip()
     if not text:
@@ -96,11 +94,11 @@ def compute_groundedness(answer: str, passages: list[RetrievedPassage]) -> float
     n_passages = len(passages)
     grounded_flags: list[bool] = []
     cursor = 0
+
     for match in _CITATION_RE.finditer(text):
         segment = text[cursor : match.start()].strip()
         if _HAS_WORD_RE.search(segment):
-            index = int(match.group(1))
-            grounded_flags.append(1 <= index <= n_passages)
+            grounded_flags.append(all(1 <= i <= n_passages for i in _indices(match)))
         cursor = match.end()
 
     trailing = text[cursor:].strip()

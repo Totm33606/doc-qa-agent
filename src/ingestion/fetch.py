@@ -3,17 +3,13 @@
 Downloads Markdown source files directly from the `fastapi/fastapi` GitHub
 repository (not the rendered HTML site) at a pinned release tag
 (`config.fastapi_repo_ref`), so the corpus is byte-for-byte reproducible
-and doesn't depend on the live site being up. Two preprocessing passes are
-applied before writing each file to `data/raw/`:
-
-1. Code-snippet macros (`{* path/to/file.py hl[6:7] *}`, FastAPI's own docs
-   build syntax for including source examples) are resolved by fetching the
-   referenced `docs_src/...` file and inlining it as a fenced code block —
-   without this, a third of a typical tutorial page renders as an empty
-   line where the actual code example is supposed to be.
-2. `///tip ... ///` / `///note ... ///` admonition blocks (a
-   markdown-extension syntax the rendered site understands but a plain
-   Markdown reader does not) are flattened into blockquotes.
+and doesn't depend on the live site being up. Four cleanup passes turn
+that raw source into plain Markdown before it's written to `data/raw/` —
+see each function's own docstring/comment for what it does and why:
+`_inline_snippets` (resolves FastAPI's `{* path *}` code-snippet macro),
+`_flatten_admonitions` (`///tip ... ///` blocks), `_strip_header_ids`
+(`{ #anchor }` suffixes) and `_strip_termy_divs` (the animated-terminal
+HTML wrapper).
 
 This script only runs when refreshing the corpus — it is not part of the
 test suite or the API's request path, so its network dependency never
@@ -203,15 +199,6 @@ def _strip_termy_divs(markdown: str) -> str:
     return _TERMY_DIV.sub("", markdown)
 
 
-def preprocess(markdown: str, ref: str, client: httpx.Client) -> str:
-    """Apply the full cleanup pipeline: snippets -> admonitions -> header ids -> termy divs."""
-    markdown = _inline_snippets(markdown, ref, client)
-    markdown = _flatten_admonitions(markdown)
-    markdown = _strip_header_ids(markdown)
-    markdown = _strip_termy_divs(markdown)
-    return markdown
-
-
 @app.command()
 def run(ref: str = typer.Option(None, help="FastAPI git ref/tag to pin the corpus to.")) -> None:
     """Fetch, clean and write every page in CORPUS_PAGES to data/raw/, plus a manifest."""
@@ -227,7 +214,10 @@ def run(ref: str = typer.Option(None, help="FastAPI git ref/tag to pin the corpu
                 logger.warning("Page fetch failed (%s): %s", response.status_code, url)
                 continue
 
-            cleaned = preprocess(response.text, resolved_ref, client)
+            cleaned = _inline_snippets(response.text, resolved_ref, client)
+            cleaned = _flatten_admonitions(cleaned)
+            cleaned = _strip_header_ids(cleaned)
+            cleaned = _strip_termy_divs(cleaned)
             out_path = config.raw_docs_dir / page
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(cleaned, encoding="utf-8")

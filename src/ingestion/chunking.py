@@ -161,17 +161,12 @@ def chunk_markdown_aware(text: str, source_file: str) -> list[DocChunk]:
     return chunks
 
 
-def chunk_text(text: str, source_file: str, strategy: ChunkingStrategy) -> list[DocChunk]:
-    if strategy is ChunkingStrategy.FIXED:
-        return chunk_fixed(text, source_file)
-    return chunk_markdown_aware(text, source_file)
-
-
 def chunk_corpus(raw_docs_dir: Path, strategy: ChunkingStrategy) -> list[DocChunk]:
     """Chunk every Markdown file under `raw_docs_dir`, in a stable (sorted) order."""
+    chunk_one = chunk_fixed if strategy is ChunkingStrategy.FIXED else chunk_markdown_aware
     chunks: list[DocChunk] = []
     for path in sorted(raw_docs_dir.rglob("*.md")):
         source_file = path.relative_to(raw_docs_dir).as_posix()
         text = path.read_text(encoding="utf-8")
-        chunks.extend(chunk_text(text, source_file, strategy))
+        chunks.extend(chunk_one(text, source_file))
     return chunks

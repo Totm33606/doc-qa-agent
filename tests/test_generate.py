@@ -49,6 +49,34 @@ def test_extract_citations_returns_empty_when_no_markers() -> None:
     assert extract_citations("No citations here at all.", PASSAGES) == []
 
 
+def test_extract_citations_accepts_bare_index_form() -> None:
+    """qwen2.5:7b-instruct sometimes echoes the "[N]" index notation shown in the passage
+    context instead of the requested "[source: N]" — same meaning, different spelling."""
+    answer = "Declare a fixed path before a variable one [1]."
+    citations = extract_citations(answer, PASSAGES)
+    assert len(citations) == 1
+    assert citations[0].source_file == "tutorial/path-params.md"
+    assert citations[0].matched_passage is True
+
+
+def test_extract_citations_splits_a_multi_index_marker_into_separate_citations() -> None:
+    """ "[source: 2,5]" bundles two references in one marker — one Citation per index."""
+    answer = "Claim backed by two passages. [source: 1,2]"
+    citations = extract_citations(answer, PASSAGES)
+    assert [c.source_file for c in citations] == [
+        "tutorial/path-params.md",
+        "tutorial/query-params.md",
+    ]
+    assert all(c.matched_passage for c in citations)
+
+
+def test_extract_citations_multi_index_marker_flags_the_invalid_one_only() -> None:
+    answer = "Claim with one fabricated source. [source: 1,99]"
+    citations = extract_citations(answer, PASSAGES)
+    assert citations[0].matched_passage is True
+    assert citations[1].matched_passage is False
+
+
 def test_extract_citations_handles_multiple_markers() -> None:
     answer = "First claim. [source: 1] Second claim. [source: 2]"
     citations = extract_citations(answer, PASSAGES)
@@ -96,6 +124,66 @@ def test_compute_groundedness_punctuation_only_segment_is_not_a_claim() -> None:
     previous marker) shouldn't inflate the denominator either."""
     answer = "Real claim [source: 1]. [source: 2]"
     assert compute_groundedness(answer, PASSAGES) == 1.0
+
+
+def test_compute_groundedness_accepts_bare_index_citations() -> None:
+    answer = "First claim [1]. Second claim [2]."
+    assert compute_groundedness(answer, PASSAGES) == 1.0
+
+
+def test_compute_groundedness_multi_index_marker_grounded_when_all_valid() -> None:
+    answer = "Claim backed by two passages. [source: 1,2]"
+    assert compute_groundedness(answer, PASSAGES) == 1.0
+
+
+def test_compute_groundedness_multi_index_marker_ungrounded_if_any_index_invalid() -> None:
+    """One real citation bundled with one fabricated one still cites a passage that was
+    never shown — no partial credit, matching the all-or-nothing rule everywhere else."""
+    answer = "Claim with one fabricated source. [source: 1,99]"
+    assert compute_groundedness(answer, PASSAGES) == 0.0
+
+
+def test_compute_groundedness_leading_citation_counts_for_nothing() -> None:
+    """A citation with nothing real before it ('[1] Claim.') doesn't grade anything — not
+    the (empty) text before it, and not the claim that follows either. It's simply not a
+    trailing citation for anyone. A deliberate design choice, not an oversight: see the
+    module docstring for why leniency here was tried and then removed."""
+    answer = "[source: 1] The only claim in this answer, cited up front."
+    assert compute_groundedness(answer, PASSAGES) == 0.0
+
+
+def test_compute_groundedness_leading_citation_does_not_rescue_the_next_claim() -> None:
+    """ "[1] Claim A. [2] Claim B." — [1] leads with nothing before it, so it counts for
+    nothing; "Claim A." is graded normally by the trailing [2] (valid); "Claim B" — the
+    tail, with no marker after it — is genuinely uncited. 1 of 2 real claims grounded."""
+    answer = "[source: 1] Claim A. [source: 2] Claim B."
+    assert compute_groundedness(answer, PASSAGES) == 0.5
+
+
+def test_compute_groundedness_leading_citation_real_world_example() -> None:
+    """A real qwen2.5:7b-instruct answer (eval/eval_details.md, q06/fixed) that cites
+    every claim *before* it instead of after. Each leading marker counts for nothing; each
+    non-empty segment is graded by whichever marker trails it: "A FastAPI dependency is a
+    function..." is graded by [2] (valid), "It can return values..." by [4] (valid),
+    "Dependencies can have sub-dependencies..." by [5] (valid) — 3 grounded claims. The
+    final "Therefore, ..." restatement has no marker after it at all, so it's the 4th,
+    uncited, segment: 3/4 = 0.75."""
+    answer = (
+        "[1] A FastAPI dependency is a function that can take the same parameters as a "
+        "path operation function. [2] It can return values or not, and can declare "
+        "request requirements or other sub-dependencies. [4] Dependencies can have "
+        "sub-dependencies, and FastAPI will take care of solving them. [5] What makes a "
+        'dependency is that it should be a "callable". Therefore, the minimum requirement '
+        "for something to be usable as a FastAPI dependency is that it must be a "
+        '"callable".'
+    )
+    five_passages = [
+        *PASSAGES,
+        _passage("tutorial/dependencies/index.md", "root"),
+        _passage("tutorial/dependencies/sub-dependencies.md", "root"),
+        _passage("tutorial/dependencies/classes-as-dependencies.md", "root"),
+    ]
+    assert compute_groundedness(answer, five_passages) == pytest.approx(0.75)
 
 
 def test_generate_answer_falls_back_to_build_llm_when_none_given(

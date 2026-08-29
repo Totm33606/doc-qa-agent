@@ -381,6 +381,29 @@ index is resolved back to the exact `(source_file, section)` in
 `generate.py::extract_citations`, so there's no loss of precision, only a
 far more robust format for a small model to actually produce.
 
+**The prompt asks for `[source: N]` only — the scorer additionally
+accepts bare `[N]` and a single marker citing several passages at once
+(`[source: 2,5]`), never the other way around.** The model sometimes
+echoes the `[N] file#section` index notation it was *shown* in the
+context block instead of the requested form, or bundles two references
+into one bracket; recognizing only the strict single-index form meant
+every such citation was silently invisible to the scorer, even though
+it's an unambiguous reference to real passages. `_CITATION_RE` in
+`generate.py` matches all three; a bundled marker only counts as grounded
+if *every* index in it is valid — one real citation next to one
+fabricated one still cites a passage that was never shown. What it does
+*not* tolerate is
+**placement**: a citation only counts if it trails the claim it supports
+("Claim. [source: 1]"), matching what the prompt actually asks for. A
+citation with nothing real before it — leading a claim instead of
+following one — counts for nothing, on either side. An earlier version
+tried to rescue leading citations by carrying them forward to the next
+claim; that measurably worked, but it also meant the score stopped
+reflecting whether the model followed the citation format actually
+requested, so the stricter rule was kept instead (see
+`generation/generate.py`'s module docstring and `tests/test_generate.py`
+for a real captured example of both).
+
 `generation/llm.py::build_llm` mirrors `agent/agent.py::_build_llm` in the
 finrisk-agent sibling project (Azure OpenAI > local server > plain
 OpenAI), with one deliberate difference: **the local server is the
@@ -399,74 +422,86 @@ entry is a real file in `data/raw/`, checked programmatically to exist.
 run:
 
 Numbers below are from an actual run of `uv run python -m eval.run_eval`
-on this repository (38 questions, k=5, `qwen2.5:7b-instruct` via Ollama
-for generation) — not rounded to look better:
+(38 questions, k=5, `qwen2.5:7b-instruct` via Ollama for generation) — not
+rounded to look better:
 
 | Metric | Fixed-size | Markdown-aware |
 |---|---|---|
 | Precision@5 | 0.5632 | **0.5789** |
 | Recall@5 | **0.9737** | 0.9342 |
 | MRR | **0.9079** | 0.8662 |
-| Mean groundedness | 0.7895 | **0.8114** |
+| Mean groundedness | 0.9803 | **1.0** |
 
 **In plain terms:** both strategies find *a* correct source for nearly
 every question (recall is high for both) — the real difference is
-*ranking*. Fixed-size chunking's MRR of 0.91 vs markdown-aware's 0.87
-means fixed-size tends to put the right passage closer to position 1;
-markdown-aware wins narrowly on precision@5 (marginally fewer irrelevant
-passages in the top 5) and on groundedness. **Neither strategy is
-strictly better here** — the honest reading is that at this corpus size
-(347 vs 693 chunks) and this k, the two are close, with fixed-size having
-a slight edge on ranking quality and markdown-aware a slight edge on
-precision and downstream answer grounding. This is a smaller, noisier gap
-than the "markdown-aware should obviously win" intuition might predict,
-which is exactly why measuring it beats assuming it.
+*ranking*: fixed-size's higher MRR means it tends to put the right
+passage closer to rank 1. **Neither strategy is strictly better here** —
+at this corpus size (347 vs 693 chunks) and this k, the gap is small and
+noisy, which is the point of measuring it instead of assuming
+markdown-aware would obviously win.
 
-**How `precision@k` / `recall@k` / `MRR` are computed**
-(`eval/run_eval.py::evaluate_retrieval`): a question's "correct" sources
-are the file(s) in its `expected_sources`. `precision@k` = (retrieved
-passages whose file is in `expected_sources`) / k. `recall@k` = (expected
-files that appear anywhere in the top-k) / (total expected files). `MRR`
-= 1/rank of the first retrieved passage from an expected file, averaged
-over all questions. Ground truth is at the **file** level, not the
-chunk/section level — the two strategies don't share chunk boundaries, so
-file-level agreement is the fair common ground for comparing them.
+**Precision@5 is capped well below 1.0 by the metric's own denominator,
+not by a retrieval flaw.** 34 of 38 questions expect exactly one source
+file, and `precision@k` always divides by `k=5` — a perfect top-1 hit
+still caps at 0.20 unless more chunks from that same file also land in
+the top 5. The actual ceiling (`min(5, chunks available from the expected
+file(s)) / 5`, averaged over all 38 questions) is **0.868** (fixed) and
+**0.989** (markdown) — most expected files are long enough to contribute
+5+ chunks — so the achieved 0.563/0.579 reflects real retrieval headroom,
+not a metric artifact. Recall@5 and MRR are the more informative numbers
+for this golden set's mostly-single-source structure.
 
-**How `groundedness` is computed**
-(`generation/generate.py::compute_groundedness`): the answer is split at
-each `[source: N]` marker; the text before a marker is one "claim
-segment", counted as grounded only if `N` is a valid index into the
-passages actually retrieved and the segment contains actual claim text
-(not just leftover punctuation — see below). This is a **syntactic
-proxy**, not a semantic entailment check — it catches "the model cited
-nothing" and "the model cited something it wasn't shown" (real
-hallucination signals), but it does *not* verify that the cited passage
-actually *says* what the claim asserts, and it can't detect a claim
-smuggled into the middle of a multi-sentence segment that only gets a
-citation at the very end (that whole segment is scored as one unit). A
-cheaper, real limitation worth being upfront about, in the spirit of not
-rounding the numbers above to look flattering either.
-
-**A real bug this caught in its own scoring, found from a live `/ask`
-response**: an earlier version counted *any* leftover non-whitespace text
-after the last citation as an uncited claim. `qwen2.5:7b-instruct`
-sometimes writes `"...claim [source: 3]."` — period *after* the bracket,
-the mirror image of the more common `"...claim. [source: 3]"` — which left
-a lone trailing `"."` that isn't empty, so it silently counted as a whole
-extra ungrounded "claim" on top of an answer that was, in substance, fully
-cited. The fix requires a segment to contain at least one word character
-to count as a real claim at all (`_HAS_WORD_RE` in `generate.py`), applied
-uniformly to every segment, not just the trailing one — a lone citation
-with no real claim text before it doesn't inflate the denominator either.
-This alone moved mean groundedness from 0.72/0.73 to 0.79/0.81 across the
-two strategies on the same 38 questions — the retrieval numbers above were
-never affected, only the generation-side metric, which is exactly the
-kind of thing a hand-checked golden set is supposed to surface.
+**How the metrics are computed:**
+- `precision@k` / `recall@k` / `MRR` (`eval/run_eval.py::retrieval_metrics`):
+  ground truth is the file(s) in `expected_sources`, checked at **file**
+  level — the two chunking strategies don't share chunk boundaries, so
+  file-level agreement is the only fair common ground for comparing them.
+  `MRR` = 1/rank of the first retrieved passage from an expected file.
+- `groundedness` (`generation/generate.py::compute_groundedness`): the
+  answer is split at each citation marker (`[source: N]` or bare `[N]`);
+  the text before a marker counts as grounded only if the index is valid
+  *and* the marker trails real claim text — a leading citation, with
+  nothing real before it, counts for nothing (see
+  [Generation & citations](#generation--citations)). A syntactic proxy,
+  not a semantic check: it can't verify the cited passage actually *says*
+  what the claim asserts.
 
 ```bash
 uv run python -m eval.run_eval                    # full report: retrieval + generation
 uv run python -m eval.run_eval --skip-generation   # retrieval only, no LLM required (what CI runs)
 ```
+
+**Trusting these numbers without re-reading 76 raw outputs by hand** —
+two checks, not one. The scoring functions are unit-tested against small,
+hand-computed cases with a known right answer (`tests/test_eval.py`,
+`tests/test_generate.py`) — e.g. `retrieval_metrics` is checked against a
+hand-picked ranking where precision@3=1/3, recall@3=1/2, MRR=1/2 are
+worked out on paper first, not just the 0.0/1.0 extremes a subtler bug
+could hide behind. That's how two real scoring bugs were actually found —
+a citation styled `"claim [3]."` (period after the bracket) leaving a
+stray, uncited `"."`, and bare `[N]` citations going unrecognized — by
+reading real generated answers, not by staring at an aggregate number.
+Every run also writes **`eval/eval_details.md`**: one row per (question,
+strategy) with the question, reference answer, expected vs.
+actually-retrieved sources, the real generated answer, and that row's own
+precision/recall/MRR/groundedness — built from the exact same
+`evaluate_question` calls as the aggregate report, so a suspicious mean is
+always one file away from the raw rows behind it. Gitignored, like
+`eval_report.json` — regenerate via the commands above.
+
+**Trusting `golden_set.yaml`'s `expected_sources` is a separate
+question** from trusting the scoring code — they were typed by hand while
+reading the real corpus, which is one person's read, not an independent
+check. Two things actually probed this, honestly limited: a
+phrase-matching script against the real corpus flagged 4 of 38 questions
+on a first pass, and all 4 turned out to be the script being too literal
+(markdown formatting breaking an exact-substring match), not real
+misassignments, once checked by hand — worth naming that I wrote both the
+questions and the check, so this isn't a truly independent verification.
+A more corpus-blind signal: no question's expected file is missing from
+the top-5 of *both* strategies at once — a genuinely wrong file would
+have no particular reason to keep surviving two independently-chunked
+retrievers.
 
 ## API
 
@@ -525,7 +560,7 @@ resolves each one back to the exact file and section it came from, and
 ## Testing & quality gates
 
 ```bash
-uv run pytest          # 82 tests, hermetic except one file (see below)
+uv run pytest          # 94 tests, hermetic except one file (see below)
 uv run ruff check src tests eval
 uv run ruff format --check src tests eval
 uv run mypy src tests eval
@@ -590,12 +625,11 @@ and PR, mirroring finrisk-agent's own quality bar exactly.
   in the numbers' own section** (see [Evaluation](#evaluation)) rather
   than only in code comments — a metric whose limitations aren't stated
   next to its headline number is easy to over-trust.
-- **Both strategies are scored by the exact same pipeline, retrievers and
-  Chroma access pattern** (`eval/run_eval.py::evaluate_retrieval` /
-  `evaluate_generation` loop over `ChunkingStrategy` and reuse the same
-  code path for both) — the only thing that differs between the two rows
-  in the [Evaluation](#evaluation) table is which collection got built,
-  never how it's queried or scored.
+- **Both strategies are scored by the exact same pipeline** — `run_all`
+  loops over `ChunkingStrategy` and calls `evaluate_question` the same way
+  for both — the only thing that differs between the two rows in the
+  [Evaluation](#evaluation) table is which collection got built, never how
+  it's queried or scored.
 - **File-level, not chunk-level, retrieval ground truth.** The two
   chunking strategies produce different chunk boundaries for the same
   underlying text, so scoring "did the exact expected chunk come back" is

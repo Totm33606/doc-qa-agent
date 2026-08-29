@@ -100,3 +100,32 @@ class GenerationMetrics(BaseModel):
     strategy: ChunkingStrategy
     mean_groundedness: float
     n_questions: int
+
+
+class QuestionResult(BaseModel):
+    """The full detail behind one (question, strategy) data point in the aggregate metrics.
+
+    `RetrievalMetrics`/`GenerationMetrics` are averages over exactly these
+    rows — one `QuestionResult` per golden question per strategy is what
+    `eval/run_eval.py::write_details_markdown` dumps for manual review, so
+    a suspicious aggregate number can always be traced back to the
+    specific question(s) behind it instead of taken on faith.
+    """
+
+    strategy: ChunkingStrategy
+    question_id: str
+    question: str
+    category: str
+    expected_answer: str
+    expected_sources: list[str]
+    retrieved_sources: list[str] = Field(
+        ..., description="Source files of the top-k retrieved passages, in rank order"
+    )
+    precision: float
+    recall: float
+    reciprocal_rank: float
+    generated_answer: str | None = Field(
+        None, description="None when generation was skipped for this run"
+    )
+    citations: list[Citation] = Field(default_factory=list)
+    groundedness_score: float | None = None
