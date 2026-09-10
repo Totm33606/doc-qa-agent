@@ -78,6 +78,33 @@ def test_query_ranks_more_similar_text_higher() -> None:
     assert results[0].chunk_id == "exact"
 
 
+def test_get_all_round_trips_every_chunk_with_its_metadata() -> None:
+    """What `retrieval.bm25` indexes — a chunk must come back out intact, not partially."""
+    store = ChunkStore(persist_dir=None, collection_name="test_get_all")
+    chunk = _chunk(
+        "c1", "background tasks", source_file="tutorial/background-tasks.md", section="Using"
+    )
+    store.add([chunk], embedder.embed_documents([chunk.text]))
+
+    restored = store.get_all()
+
+    assert len(restored) == 1
+    assert restored[0] == chunk
+
+
+def test_get_all_on_empty_collection_returns_empty_list() -> None:
+    store = ChunkStore(persist_dir=None, collection_name="test_get_all_empty")
+    assert store.get_all() == []
+
+
+def test_get_all_returns_every_chunk() -> None:
+    store = ChunkStore(persist_dir=None, collection_name="test_get_all_many")
+    chunks = [_chunk(f"c{i}", f"chunk number {i}") for i in range(7)]
+    store.add(chunks, embedder.embed_documents([c.text for c in chunks]))
+
+    assert {c.chunk_id for c in store.get_all()} == {f"c{i}" for i in range(7)}
+
+
 def test_reset_clears_the_collection() -> None:
     store = ChunkStore(persist_dir=None, collection_name="test_reset")
     chunk = _chunk("c1", "some text")

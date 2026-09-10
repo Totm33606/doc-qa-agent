@@ -1,11 +1,18 @@
-"""Evaluate retrieval and generation against eval/golden_set.yaml, for both chunking strategies.
+"""Evaluate retrieval and generation against eval/golden_set.yaml, for every strategy x mode.
 
 Mirrors `ml_pipeline/eval.py` in the finrisk-agent sibling project: load
 artifacts (here, the two Chroma collections built by `ingestion.build`),
 score against a held-out, hand-verified ground truth, and write a metrics
 report — `eval_report.json` here, `models/metrics.json` there.
 
-Retrieval metrics (per strategy, at a fixed k):
+Four rows, not two: the two chunking strategies (`fixed`, `markdown`) are
+each scored in both retrieval modes (`dense`, `hybrid` — see
+`retrieval/retriever.py`), from the same golden set in one run. Adding BM25
+alongside embedding search is a retrieval design decision like any other
+here, so what it's worth on this corpus is a measured number in the report,
+not an assumption baked into the default.
+
+Retrieval metrics (per strategy x mode, at a fixed k):
 - **precision@k**: of the k passages retrieved, what fraction come from a
   file the golden question actually expects.
 - **recall@k**: of the files the golden question expects, what fraction
@@ -16,14 +23,14 @@ Retrieval metrics (per strategy, at a fixed k):
   don't directly capture.
 
 Generation metric: mean groundedness (see `generation.generate`) over the
-same question set, computed once per strategy using that strategy's own
-retrieved passages — this is what lets the two strategies be compared
-head-to-head on equal footing, not just on retrieval but on the answer
-quality retrieval enables downstream.
+same question set, computed once per (strategy, mode) pair using that
+pair's own retrieved passages — this is what lets the configurations be
+compared head-to-head on equal footing, not just on retrieval but on the
+answer quality retrieval enables downstream.
 
 `evaluate_question` is the single source of truth behind every aggregate
 number: one question, one retrieval call, one (optional) generation call.
-`run_all` calls it once per (question, strategy) pair, then
+`run_all` calls it once per (question, strategy, mode) triple, then
 `retrieval_metrics`/`generation_metrics` reduce those rows into the
 aggregate report — the same rows also feed `write_details_markdown`'s
 full per-question dump, so a suspicious mean is never more than one file
@@ -32,9 +39,9 @@ generation, non-deterministic) pass re-calling the LLM.
 
 Run: `uv run python -m eval.run_eval` (needs both collections already
 built via `uv run python -m ingestion.build`). Generation scoring calls
-the configured LLM (Ollama by default) once per question per strategy —
-pass `--skip-generation` to score retrieval only, e.g. in CI, where no LLM
-is available.
+the configured LLM (Ollama by default) once per question per (strategy,
+mode) pair — 4 x 38 calls for the full set — so pass `--skip-generation`
+to score retrieval only, e.g. in CI, where no LLM is available.
 """
 
 from __future__ import annotations
@@ -53,6 +60,7 @@ from common.schemas import (
     GoldenQuestion,
     QuestionResult,
     RetrievalMetrics,
+    RetrievalMode,
 )
 from generation.generate import generate_answer
 from ingestion.embed import BGEEmbedder, Embedder
@@ -88,7 +96,7 @@ def evaluate_question(
     k: int = DEFAULT_K,
     skip_generation: bool = False,
 ) -> QuestionResult:
-    """Score one golden question against one strategy — the row everything else aggregates."""
+    """Score one golden question against one retriever — the row everything else aggregates."""
     passages = retriever.retrieve(question.question, top_k=k)
     retrieved_files = [p.source_file for p in passages]
     expected_files = set(question.expected_sources)
@@ -111,6 +119,7 @@ def evaluate_question(
 
     return QuestionResult(
         strategy=retriever.strategy,
+        mode=retriever.mode,
         question_id=question.id,
         question=question.question,
         category=question.category,
@@ -127,11 +136,12 @@ def evaluate_question(
 
 
 def retrieval_metrics(
-    results: list[QuestionResult], strategy: ChunkingStrategy, k: int
+    results: list[QuestionResult], strategy: ChunkingStrategy, mode: RetrievalMode, k: int
 ) -> RetrievalMetrics:
     n = len(results)
     return RetrievalMetrics(
         strategy=strategy,
+        mode=mode,
         k=k,
         precision_at_k=sum(r.precision for r in results) / n,
         recall_at_k=sum(r.recall for r in results) / n,
@@ -141,44 +151,49 @@ def retrieval_metrics(
 
 
 def generation_metrics(
-    results: list[QuestionResult], strategy: ChunkingStrategy
+    results: list[QuestionResult], strategy: ChunkingStrategy, mode: RetrievalMode
 ) -> GenerationMetrics:
     scores = [r.groundedness_score for r in results if r.groundedness_score is not None]
     n = len(scores)
-    return GenerationMetrics(strategy=strategy, mean_groundedness=sum(scores) / n, n_questions=n)
+    return GenerationMetrics(
+        strategy=strategy, mode=mode, mean_groundedness=sum(scores) / n, n_questions=n
+    )
 
 
 def run_all(
     embedder: Embedder, k: int = DEFAULT_K, skip_generation: bool = False
 ) -> tuple[dict[str, object], list[QuestionResult]]:
-    """Score both strategies. Returns the aggregate report plus every underlying row —
+    """Score every strategy x mode. Returns the aggregate report plus every underlying row —
     the latter is what `write_details_markdown` dumps for manual review."""
     questions = load_golden_set()
-    strategies: dict[str, object] = {}
+    strategies: dict[str, dict[str, object]] = {}
     all_results: list[QuestionResult] = []
 
     for strategy in ChunkingStrategy:
-        retriever = Retriever(embedder, strategy)
-        results = [
-            evaluate_question(q, retriever, k=k, skip_generation=skip_generation) for q in questions
-        ]
-        all_results.extend(results)
+        for mode in RetrievalMode:
+            retriever = Retriever(embedder, strategy, mode)
+            results = [
+                evaluate_question(q, retriever, k=k, skip_generation=skip_generation)
+                for q in questions
+            ]
+            all_results.extend(results)
 
-        r_metrics = retrieval_metrics(results, strategy, k)
-        entry: dict[str, object] = {"retrieval": r_metrics.model_dump()}
-        if not skip_generation:
-            entry["generation"] = generation_metrics(results, strategy).model_dump()
-        strategies[strategy.value] = entry
+            r_metrics = retrieval_metrics(results, strategy, mode, k)
+            entry: dict[str, object] = {"retrieval": r_metrics.model_dump()}
+            if not skip_generation:
+                entry["generation"] = generation_metrics(results, strategy, mode).model_dump()
+            strategies.setdefault(strategy.value, {})[mode.value] = entry
 
-        logger.info(
-            "strategy=%s precision@%d=%.3f recall@%d=%.3f mrr=%.3f",
-            strategy.value,
-            k,
-            r_metrics.precision_at_k,
-            k,
-            r_metrics.recall_at_k,
-            r_metrics.mrr,
-        )
+            logger.info(
+                "strategy=%s mode=%s precision@%d=%.3f recall@%d=%.3f mrr=%.3f",
+                strategy.value,
+                mode.value,
+                k,
+                r_metrics.precision_at_k,
+                k,
+                r_metrics.recall_at_k,
+                r_metrics.mrr,
+            )
 
     report = {"k": k, "n_questions": len(questions), "strategies": strategies}
     return report, all_results
@@ -189,12 +204,12 @@ def _quote_block(text: str) -> str:
 
 
 def write_details_markdown(results: list[QuestionResult], path: Path, k: int) -> None:
-    """Dump every (question, strategy) row to a human-readable Markdown transcript.
+    """Dump every (question, strategy, mode) row to a human-readable Markdown transcript.
 
-    One section per strategy, one subsection per question, in golden-set
-    order — meant to be read top to bottom, not queried, so a reviewer can
-    check each generated answer against its expected answer and retrieved
-    sources without re-running anything.
+    One section per (strategy, mode) pair, one subsection per question, in
+    golden-set order — meant to be read top to bottom, not queried, so a
+    reviewer can check each generated answer against its expected answer and
+    retrieved sources without re-running anything.
     """
     lines = ["# DocQA-Agent — Evaluation Details", ""]
     lines.append(
@@ -202,13 +217,13 @@ def write_details_markdown(results: list[QuestionResult], path: Path, k: int) ->
         "Regenerate via `uv run python -m eval.run_eval` — not meant to be hand-edited."
     )
 
-    for strategy in ChunkingStrategy:
-        strategy_results = [r for r in results if r.strategy is strategy]
-        if not strategy_results:
+    for strategy, mode in ((s, m) for s in ChunkingStrategy for m in RetrievalMode):
+        section_results = [r for r in results if r.strategy is strategy and r.mode is mode]
+        if not section_results:
             continue
-        lines.append(f"\n## Strategy: {strategy.value}\n")
+        lines.append(f"\n## Strategy: {strategy.value} · mode: {mode.value}\n")
 
-        for r in strategy_results:
+        for r in section_results:
             score_bits = (
                 f"precision={r.precision:.2f}, recall={r.recall:.2f}, MRR={r.reciprocal_rank:.2f}"
             )

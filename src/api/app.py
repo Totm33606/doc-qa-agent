@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 
-from common.schemas import AskRequest, AskResponse, ChunkingStrategy
+from common.schemas import AskRequest, AskResponse, ChunkingStrategy, RetrievalMode
 from generation.generate import generate_answer
 from ingestion.embed import BGEEmbedder, Embedder
 from retrieval.retriever import Retriever
@@ -26,16 +26,23 @@ logger = logging.getLogger(__name__)
 
 
 class DocQARuntime:
-    """Owns the embedder and one retriever per chunking strategy, built once at startup."""
+    """Owns the embedder and one retriever per (chunking strategy, retrieval mode), built at startup.
+
+    Four retrievers, so a request never pays to construct one — and only the
+    two hybrid ones build a BM25 index, which is why they're built here once
+    rather than lazily per request.
+    """
 
     def __init__(self) -> None:
         self.embedder: Embedder | None = None
-        self.retrievers: dict[ChunkingStrategy, Retriever] = {}
+        self.retrievers: dict[tuple[ChunkingStrategy, RetrievalMode], Retriever] = {}
 
     def start(self) -> None:
         self.embedder = BGEEmbedder()
         self.retrievers = {
-            strategy: Retriever(self.embedder, strategy) for strategy in ChunkingStrategy
+            (strategy, mode): Retriever(self.embedder, strategy, mode)
+            for strategy in ChunkingStrategy
+            for mode in RetrievalMode
         }
 
     def stop(self) -> None:
@@ -45,7 +52,7 @@ class DocQARuntime:
     def ask(self, request: AskRequest) -> AskResponse:
         if self.embedder is None:
             raise RuntimeError("Runtime not started — call `runtime.start()` first.")
-        retriever = self.retrievers[request.strategy]
+        retriever = self.retrievers[(request.strategy, request.mode)]
         passages = retriever.retrieve(request.question, top_k=request.top_k)
         return generate_answer(request.question, passages)
 

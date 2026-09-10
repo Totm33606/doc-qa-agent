@@ -42,6 +42,9 @@ class DocQAConfig(BaseSettings):
 
     # --- Retrieval ------------------------------------------------------
     default_top_k: int = 5
+    # Hybrid (dense + BM25) fusion, see retrieval/retriever.py:
+    rrf_k: int = 60  # the reciprocal-rank-fusion constant, 60 per Cormack et al. (2009)
+    hybrid_candidates: int = 20  # candidates asked of *each* retriever before fusing
 
     # --- Generation (LLM) ------------------------------------------------------
     # Same priority order as finrisk-agent's `_build_llm`: Azure OpenAI > a

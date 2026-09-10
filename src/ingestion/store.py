@@ -15,7 +15,7 @@ from pathlib import Path
 import chromadb
 from chromadb.api import ClientAPI
 
-from common.schemas import DocChunk, RetrievedPassage
+from common.schemas import ChunkingStrategy, DocChunk, RetrievedPassage
 
 
 class ChunkStore:
@@ -81,6 +81,33 @@ class ChunkStore:
                 )
             )
         return passages
+
+    def get_all(self) -> list[DocChunk]:
+        """Every stored chunk, rebuilt from its documents + metadata.
+
+        Used by `retrieval.bm25` to build a lexical index over the exact
+        same chunks the dense index holds — so hybrid search fuses two views
+        of one corpus, not two corpora that could silently drift apart.
+        """
+        if self._collection.count() == 0:
+            return []
+        result = self._collection.get(include=["documents", "metadatas"])
+        ids = result["ids"]
+        documents = result["documents"] or []
+        metadatas = result["metadatas"] or []
+
+        return [
+            DocChunk(
+                chunk_id=chunk_id,
+                text=text,
+                source_file=str(metadata["source_file"]),
+                section=str(metadata["section"]),
+                strategy=ChunkingStrategy(metadata["strategy"]),
+                chunk_index=int(metadata["chunk_index"]),  # type: ignore[arg-type]  # chromadb types metadata values as a union; these two are always written as ints by add()
+                token_count=int(metadata["token_count"]),  # type: ignore[arg-type]  # see above
+            )
+            for chunk_id, text, metadata in zip(ids, documents, metadatas, strict=True)
+        ]
 
     def count(self) -> int:
         return self._collection.count()

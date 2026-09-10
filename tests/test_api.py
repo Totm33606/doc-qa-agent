@@ -78,11 +78,32 @@ def test_ask_returns_grounded_answer(hermetic_app: object) -> None:
     assert body["citations"][0]["matched_passage"] is True
 
 
-def test_ask_defaults_top_k_and_strategy(hermetic_app: object) -> None:
+def test_ask_defaults_top_k_strategy_and_mode(hermetic_app: object) -> None:
     with TestClient(hermetic_app) as client:  # type: ignore[arg-type]
         response = client.post("/ask", json={"question": "Why does path order matter?"})
 
     assert response.status_code == 200
+
+
+@pytest.mark.parametrize("mode", ["dense", "hybrid"])
+def test_ask_serves_every_retrieval_mode(hermetic_app: object, mode: str) -> None:
+    """Both modes are wired to a real retriever at startup — neither 500s or comes back empty."""
+    with TestClient(hermetic_app) as client:  # type: ignore[arg-type]
+        response = client.post(
+            "/ask", json={"question": "Why does path order matter?", "mode": mode}
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["passages"][0]["source_file"] == "tutorial/path-params.md"
+
+
+def test_ask_rejects_an_unknown_mode(hermetic_app: object) -> None:
+    with TestClient(hermetic_app) as client:  # type: ignore[arg-type]
+        response = client.post(
+            "/ask", json={"question": "Why does path order matter?", "mode": "sparse"}
+        )
+    assert response.status_code == 422
 
 
 def test_ask_rejects_invalid_top_k(hermetic_app: object) -> None:

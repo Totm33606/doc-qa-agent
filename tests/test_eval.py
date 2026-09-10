@@ -15,6 +15,7 @@ from common.schemas import (
     GoldenQuestion,
     QuestionResult,
     RetrievalMetrics,
+    RetrievalMode,
     RetrievedPassage,
 )
 from eval.run_eval import (
@@ -40,7 +41,7 @@ def _retrieval_metrics_for(
 ) -> RetrievalMetrics:
     """Test-only composition mirroring what `run_all` does: score each question, aggregate."""
     results = [evaluate_question(q, retriever, k=k, skip_generation=True) for q in questions]
-    return retrieval_metrics(results, retriever.strategy, k)
+    return retrieval_metrics(results, retriever.strategy, retriever.mode, k)
 
 
 def test_load_golden_set_parses_the_real_file() -> None:
@@ -76,10 +77,11 @@ def _chunk(chunk_id: str, source_file: str) -> DocChunk:
 
 
 def _retriever_with(source_files: list[str]) -> Retriever:
+    """Dense on purpose: the tests below check the metric arithmetic, not the fusion."""
     store = ChunkStore(persist_dir=None, collection_name=f"eval_test_{'_'.join(source_files)}")
     chunks = [_chunk(f"c{i}", f) for i, f in enumerate(source_files)]
     store.add(chunks, embedder.embed_documents([c.text for c in chunks]))
-    return Retriever(embedder, ChunkingStrategy.FIXED, store=store)
+    return Retriever(embedder, ChunkingStrategy.FIXED, RetrievalMode.DENSE, store=store)
 
 
 def test_retrieval_metrics_perfect_precision_and_recall() -> None:
@@ -124,6 +126,7 @@ class _StubRetriever:
     in the rank/denominator arithmetic)."""
 
     strategy = ChunkingStrategy.FIXED
+    mode = RetrievalMode.DENSE
 
     def __init__(self, passages_by_question: dict[str, list[RetrievedPassage]]) -> None:
         self._passages_by_question = passages_by_question
@@ -214,7 +217,7 @@ def test_generation_metrics_uses_groundedness_from_generate_answer(
     )
     result = evaluate_question(question, retriever, k=1, skip_generation=False)
 
-    metrics = generation_metrics([result], retriever.strategy)
+    metrics = generation_metrics([result], retriever.strategy, retriever.mode)
 
     assert metrics.mean_groundedness == 0.75
 
@@ -267,7 +270,21 @@ def test_evaluate_question_includes_generation_when_not_skipped(
     assert len(result.citations) == 1
 
 
-def test_run_all_builds_a_report_entry_per_strategy(
+def _expected_retrieval_entry(strategy: str, mode: str) -> dict[str, object]:
+    return {
+        "retrieval": {
+            "strategy": strategy,
+            "mode": mode,
+            "k": 1,
+            "precision_at_k": 1.0,
+            "recall_at_k": 1.0,
+            "mrr": 1.0,
+            "n_questions": 1,
+        }
+    }
+
+
+def test_run_all_builds_a_report_entry_per_strategy_and_mode(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(config, "chroma_dir", tmp_path / "chroma")
@@ -281,29 +298,20 @@ def test_run_all_builds_a_report_entry_per_strategy(
         "n_questions": 1,
         "strategies": {
             "fixed": {
-                "retrieval": {
-                    "strategy": "fixed",
-                    "k": 1,
-                    "precision_at_k": 1.0,
-                    "recall_at_k": 1.0,
-                    "mrr": 1.0,
-                    "n_questions": 1,
-                }
+                "dense": _expected_retrieval_entry("fixed", "dense"),
+                "hybrid": _expected_retrieval_entry("fixed", "hybrid"),
             },
             "markdown": {
-                "retrieval": {
-                    "strategy": "markdown",
-                    "k": 1,
-                    "precision_at_k": 1.0,
-                    "recall_at_k": 1.0,
-                    "mrr": 1.0,
-                    "n_questions": 1,
-                }
+                "dense": _expected_retrieval_entry("markdown", "dense"),
+                "hybrid": _expected_retrieval_entry("markdown", "hybrid"),
             },
         },
     }
-    assert len(results) == 2  # one row per strategy, for a single golden question
-    assert {r.strategy for r in results} == {ChunkingStrategy.FIXED, ChunkingStrategy.MARKDOWN}
+    # One row per (strategy, mode) pair, for a single golden question.
+    assert len(results) == 4
+    assert {(r.strategy, r.mode) for r in results} == {
+        (s, m) for s in ChunkingStrategy for m in RetrievalMode
+    }
 
 
 def test_run_all_includes_generation_unless_skipped(
@@ -318,9 +326,10 @@ def test_run_all_includes_generation_unless_skipped(
 
     report, results = run_all(embedder, k=1, skip_generation=False)
 
-    strategies = cast("dict[str, dict[str, dict[str, object]]]", report["strategies"])
-    for entry in strategies.values():
-        assert entry["generation"]["mean_groundedness"] == 1.0
+    strategies = cast("dict[str, dict[str, dict[str, dict[str, object]]]]", report["strategies"])
+    for by_mode in strategies.values():
+        for entry in by_mode.values():
+            assert entry["generation"]["mean_groundedness"] == 1.0
     assert all(r.groundedness_score == 1.0 for r in results)
 
 
@@ -332,7 +341,7 @@ def test_write_details_markdown_includes_every_row(tmp_path: Path) -> None:
     write_details_markdown([result], out_path, k=1)
 
     content = out_path.read_text(encoding="utf-8")
-    assert "## Strategy: fixed" in content
+    assert "## Strategy: fixed · mode: dense" in content
     assert "q1" in content
     assert "content for a.md" in content
     assert "precision=1.00" in content
@@ -341,6 +350,7 @@ def test_write_details_markdown_includes_every_row(tmp_path: Path) -> None:
 def test_write_details_markdown_shows_generated_answer_and_citations(tmp_path: Path) -> None:
     result = QuestionResult(
         strategy=ChunkingStrategy.FIXED,
+        mode=RetrievalMode.DENSE,
         question_id="q1",
         question="q",
         category="test",
@@ -367,6 +377,7 @@ def test_write_details_markdown_shows_generated_answer_and_citations(tmp_path: P
 def test_write_details_markdown_shows_none_when_answer_has_no_citations(tmp_path: Path) -> None:
     result = QuestionResult(
         strategy=ChunkingStrategy.FIXED,
+        mode=RetrievalMode.DENSE,
         question_id="q1",
         question="q",
         category="test",

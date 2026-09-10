@@ -20,6 +20,13 @@ class ChunkingStrategy(str, Enum):
     MARKDOWN = "markdown"
 
 
+class RetrievalMode(str, Enum):
+    """How a query is matched against the store — see retrieval/retriever.py."""
+
+    DENSE = "dense"  # cosine similarity on BGE embeddings only
+    HYBRID = "hybrid"  # dense + BM25, combined by reciprocal rank fusion
+
+
 class DocChunk(BaseModel):
     """One chunk produced by ingestion, ready to be embedded and stored."""
 
@@ -37,14 +44,15 @@ class DocChunk(BaseModel):
 
 
 class RetrievedPassage(BaseModel):
-    """A chunk returned by the retriever for a given query, with its similarity score."""
+    """A chunk returned by the retriever for a given query, with its relevance score."""
 
     chunk_id: str
     text: str
     source_file: str
     section: str
     score: float = Field(
-        ..., description="Cosine similarity to the query embedding, higher = closer"
+        ...,
+        description="Relevance score, higher = better: cosine similarity in dense mode, fused RRF score in hybrid mode",
     )
 
 
@@ -62,6 +70,7 @@ class AskRequest(BaseModel):
     question: str
     top_k: int = Field(5, ge=1, le=20)
     strategy: ChunkingStrategy = ChunkingStrategy.MARKDOWN
+    mode: RetrievalMode = RetrievalMode.HYBRID
 
 
 class AskResponse(BaseModel):
@@ -89,6 +98,7 @@ class GoldenQuestion(BaseModel):
 
 class RetrievalMetrics(BaseModel):
     strategy: ChunkingStrategy
+    mode: RetrievalMode
     k: int
     precision_at_k: float
     recall_at_k: float
@@ -98,21 +108,23 @@ class RetrievalMetrics(BaseModel):
 
 class GenerationMetrics(BaseModel):
     strategy: ChunkingStrategy
+    mode: RetrievalMode
     mean_groundedness: float
     n_questions: int
 
 
 class QuestionResult(BaseModel):
-    """The full detail behind one (question, strategy) data point in the aggregate metrics.
+    """The full detail behind one (question, strategy, mode) data point in the aggregate metrics.
 
     `RetrievalMetrics`/`GenerationMetrics` are averages over exactly these
-    rows — one `QuestionResult` per golden question per strategy is what
-    `eval/run_eval.py::write_details_markdown` dumps for manual review, so
-    a suspicious aggregate number can always be traced back to the
-    specific question(s) behind it instead of taken on faith.
+    rows — one `QuestionResult` per golden question per (strategy, mode)
+    pair is what `eval/run_eval.py::write_details_markdown` dumps for manual
+    review, so a suspicious aggregate number can always be traced back to
+    the specific question(s) behind it instead of taken on faith.
     """
 
     strategy: ChunkingStrategy
+    mode: RetrievalMode
     question_id: str
     question: str
     category: str
