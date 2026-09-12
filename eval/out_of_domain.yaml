@@ -1,0 +1,88 @@
+# Out-of-domain evaluation set for DocQA-Agent.
+#
+# Questions the corpus in data/raw/ cannot answer. Where golden_set.yaml asks
+# "does the right passage come back?", this set asks the opposite question:
+# "does the agent notice when *no* passage is right?" — the failure mode a
+# retriever with no relevance floor cannot even detect, because fusion always
+# produces a confidently-ordered top-k whether or not anything in it is
+# relevant. See eval/run_eval.py (abstention metrics + threshold sweep) and
+# retrieval/retriever.py for what consumes this.
+#
+# The categories below are the realistic failure shapes, not arbitrary
+# variety. The hard ones are deliberately over-represented: `unrelated` is
+# easy for any threshold to catch and proves little, while `adjacent-framework`
+# and `shared-vocabulary` share most of their vocabulary with the corpus and
+# are exactly where a lexical retriever hands the fusion a confident wrong
+# answer.
+#
+# There is no `expected_answer` field: the only correct response is a refusal.
+
+- id: ood01
+  category: adjacent-framework
+  question: |-
+    How do I write a Django middleware class that adds a response header to every request?
+  why: |-
+    The corpus documents FastAPI/Starlette middleware, not Django's. Shares the words "middleware", "response" and "header" with tutorial/middleware.md and advanced/middleware.md, so lexical retrieval will return confident, wrong passages.
+
+- id: ood02
+  category: adjacent-framework
+  question: |-
+    How do I define a Flask blueprint and register it on the application?
+  why: |-
+    Flask blueprints are the rough equivalent of FastAPI's APIRouter, which tutorial/bigger-applications.md covers — a near-miss the dense retriever is especially prone to, since the two concepts are semantically close.
+
+- id: ood03
+  category: adjacent-framework
+  question: |-
+    How do I add a serializer class in Django REST Framework to validate incoming data?
+  why: |-
+    DRF serializers play the role Pydantic models play in FastAPI, so this is topically adjacent to tutorial/body.md without being answerable from it.
+
+- id: ood04
+  category: shared-vocabulary
+  question: |-
+    How do I train a random forest classifier with scikit-learn and check its accuracy?
+  why: |-
+    Shares "model", "train" and "parameters" with the corpus while being an entirely different domain — the case where token overlap is misleading rather than informative.
+
+- id: ood05
+  category: shared-vocabulary
+  question: |-
+    How do I create a database index in PostgreSQL to speed up a slow query?
+  why: |-
+    "Database", "query" and "index" all occur throughout tutorial/sql-databases.md, but the corpus never covers raw PostgreSQL administration.
+
+- id: ood06
+  category: shared-vocabulary
+  question: |-
+    What is the difference between a Docker image and a Docker container?
+  why: |-
+    Deployment vocabulary overlaps the corpus's, but the deployment pages were deliberately excluded from the fetched page list (see ingestion/fetch.py).
+
+- id: ood07
+  category: wrong-language
+  question: |-
+    How do I define a REST controller in Spring Boot with Java annotations?
+  why: |-
+    Structurally the same question as declaring a FastAPI path operation, in a language and framework the corpus never mentions.
+
+- id: ood08
+  category: out-of-version
+  question: |-
+    What changed in FastAPI 0.200 and which versions of Pydantic does it support?
+  why: |-
+    About FastAPI, but the corpus is a documentation snapshot pinned to tag 0.141.1 (see data/raw/manifest.json) and contains no release notes or version history at all. The most dangerous shape: right topic, unanswerable specifics.
+
+- id: ood09
+  category: unrelated
+  question: |-
+    What is the capital of Australia and what is its population?
+  why: |-
+    A control: no lexical or semantic overlap whatsoever. Any working relevance floor must catch this one, so failing it indicates the gate is not functioning rather than that the threshold is merely too low.
+
+- id: ood10
+  category: unrelated
+  question: |-
+    Can you write me a limerick about a cat who learns to play the piano?
+  why: |-
+    A second control, and a different failure mode: an instruction rather than a question, of the kind a chat UI attracts regardless of what the system was built for.

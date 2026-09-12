@@ -3,7 +3,12 @@ from __future__ import annotations
 import pytest
 
 from common.schemas import RetrievedPassage
-from generation.generate import compute_groundedness, extract_citations, generate_answer
+from generation.generate import (
+    ABSTENTION_ANSWER,
+    compute_groundedness,
+    extract_citations,
+    generate_answer,
+)
 from tests.conftest import FakeChatModel
 
 
@@ -206,6 +211,24 @@ def test_generate_answer_with_no_passages_short_circuits() -> None:
     assert response.citations == []
     assert response.groundedness_score == 0.0
     assert llm.invocations == []
+
+
+def test_generate_answer_with_no_passages_abstains_explicitly() -> None:
+    """Retrieving nothing is a decision by the relevance floor, not an error — see
+    `retrieval.retriever`. The refusal is canned so it can't itself hallucinate."""
+    response = generate_answer(
+        "How do I train a random forest?", [], llm=FakeChatModel("never used")
+    )
+
+    assert response.abstained is True
+    assert response.answer == ABSTENTION_ANSWER
+
+
+def test_generate_answer_does_not_mark_a_real_answer_as_abstained() -> None:
+    llm = FakeChatModel("Declare fixed paths before variable ones. [source: 1]")
+    response = generate_answer("How does path ordering work?", PASSAGES, llm=llm)
+
+    assert response.abstained is False
 
 
 def test_generate_answer_builds_response_from_llm_output() -> None:

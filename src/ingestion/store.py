@@ -6,6 +6,12 @@ call its own embedding function internally — that's what lets
 `BGEEmbedder.embed_query` apply BGE's asymmetric query-instruction prefix
 (see `ingestion/embed.py`) while `embed_documents` stays unprefixed, a
 distinction Chroma's single-embedding-function model can't express.
+
+`retrieval/` reads through this class at query time, but it stays in
+`ingestion/` deliberately: a `ChunkStore` is the handle on ingestion's own
+output artifact, and `query`/`get_all` are read paths onto it. Moving it to
+`common/` would suggest the store is jointly owned, when in fact exactly one
+stage writes to it.
 """
 
 from __future__ import annotations

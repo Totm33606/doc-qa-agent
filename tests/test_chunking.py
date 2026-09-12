@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from common.config import config
 from common.schemas import ChunkingStrategy
 from ingestion.chunking import chunk_corpus, chunk_fixed, chunk_markdown_aware, count_tokens
-from ingestion.config import config
 
 SAMPLE_MARKDOWN = """\
 # Title Section

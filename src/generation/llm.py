@@ -13,7 +13,7 @@ import os
 
 from langchain_openai import AzureChatOpenAI, ChatOpenAI
 
-from ingestion.config import config
+from common.config import config
 
 
 def build_llm() -> ChatOpenAI | AzureChatOpenAI:

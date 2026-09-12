@@ -11,7 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from ingestion.config import config
+from common.config import config
 from ingestion.fetch import _inline_snippets, run
 
 

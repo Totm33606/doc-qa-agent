@@ -19,6 +19,7 @@ from fastapi import FastAPI, HTTPException
 from common.schemas import AskRequest, AskResponse, ChunkingStrategy, RetrievalMode
 from generation.generate import generate_answer
 from ingestion.embed import BGEEmbedder, Embedder
+from retrieval.rerank import CrossEncoderReranker, Reranker
 from retrieval.retriever import Retriever
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -26,21 +27,26 @@ logger = logging.getLogger(__name__)
 
 
 class DocQARuntime:
-    """Owns the embedder and one retriever per (chunking strategy, retrieval mode), built at startup.
+    """Owns the models and one retriever per (chunking strategy, retrieval mode), built at startup.
 
-    Four retrievers, so a request never pays to construct one — and only the
-    two hybrid ones build a BM25 index, which is why they're built here once
-    rather than lazily per request.
+    One retriever per combination, so a request never pays to construct one —
+    and the expensive parts are per-mode: only the hybrid ones build a BM25
+    index, only the re-ranking ones use the cross-encoder. The embedder and
+    the re-ranker are each loaded **once** and shared by every retriever that
+    needs them, rather than letting each construct its own copy of the same
+    model.
     """
 
     def __init__(self) -> None:
         self.embedder: Embedder | None = None
+        self.reranker: Reranker | None = None
         self.retrievers: dict[tuple[ChunkingStrategy, RetrievalMode], Retriever] = {}
 
     def start(self) -> None:
         self.embedder = BGEEmbedder()
+        self.reranker = CrossEncoderReranker()
         self.retrievers = {
-            (strategy, mode): Retriever(self.embedder, strategy, mode)
+            (strategy, mode): Retriever(self.embedder, strategy, mode, reranker=self.reranker)
             for strategy in ChunkingStrategy
             for mode in RetrievalMode
         }
@@ -48,6 +54,7 @@ class DocQARuntime:
     def stop(self) -> None:
         self.retrievers = {}
         self.embedder = None
+        self.reranker = None
 
     def ask(self, request: AskRequest) -> AskResponse:
         if self.embedder is None:

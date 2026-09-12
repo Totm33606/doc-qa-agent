@@ -13,9 +13,9 @@ from collections.abc import Iterator
 
 import typer
 
+from common.config import config
 from common.schemas import ChunkingStrategy, DocChunk
 from ingestion.chunking import chunk_corpus
-from ingestion.config import config
 from ingestion.embed import BGEEmbedder, Embedder
 from ingestion.store import ChunkStore
 

@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from common.config import config
 from common.schemas import ChunkingStrategy, DocChunk
 from ingestion.build import _batched, build_collection, run
-from ingestion.config import config
 from ingestion.store import ChunkStore
 from tests.conftest import FakeEmbedder
 

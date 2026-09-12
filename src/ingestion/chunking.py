@@ -32,8 +32,8 @@ from pathlib import Path
 import tiktoken
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from common.config import config
 from common.schemas import ChunkingStrategy, DocChunk
-from ingestion.config import config
 
 _encoding = tiktoken.get_encoding(config.token_encoding)
 

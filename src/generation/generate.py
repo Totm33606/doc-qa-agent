@@ -19,6 +19,15 @@ semantic entailment check — it can't verify the cited passage actually
 what this heuristic does and doesn't catch, and for the design history
 (why leading citations, and sentence-based splitting, were tried and
 dropped).
+
+**Abstention.** `generate_answer` never calls the LLM with an empty passage
+list. An empty list is not an error here, it's a decision made upstream:
+`retrieval.retriever`'s relevance floor drops candidates a cross-encoder
+judged irrelevant, so retrieving nothing means nothing in the corpus was
+relevant enough to answer from. The response is then a fixed refusal with
+`abstained=True`, which makes the prompt's "say so if the passages don't
+contain enough information" rule enforced rather than merely requested —
+a model that ignores it never gets the chance, because it is never asked.
 """
 
 from __future__ import annotations
@@ -41,8 +50,9 @@ def _indices(match: re.Match[str]) -> list[int]:
     return [int(n) for n in match.group(1).split(",")]
 
 
-_NO_PASSAGES_ANSWER = (
-    "I don't have any retrieved documentation passages to answer this question from."
+ABSTENTION_ANSWER = (
+    "I couldn't find anything in the FastAPI documentation relevant to this question, "
+    "so I won't try to answer it."
 )
 
 
@@ -113,13 +123,22 @@ def compute_groundedness(answer: str, passages: list[RetrievedPassage]) -> float
 def generate_answer(
     question: str, passages: list[RetrievedPassage], llm: ChatModel | None = None
 ) -> AskResponse:
+    """Answer from the retrieved passages, or abstain when there are none.
+
+    Two paths, and the short one is not an error case. No passages means
+    retrieval found nothing relevant enough to show (see the relevance floor
+    in `retrieval.retriever`), so the honest response is a refusal — returned
+    as a fixed string, with no LLM call, because there is nothing for a model
+    to be grounded in.
+    """
     if not passages:
         return AskResponse(
             question=question,
-            answer=_NO_PASSAGES_ANSWER,
+            answer=ABSTENTION_ANSWER,
             citations=[],
             passages=[],
             groundedness_score=0.0,
+            abstained=True,
         )
 
     model = llm or build_llm()

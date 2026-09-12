@@ -42,8 +42,12 @@ gut feeling.
 - [Retrieval](#retrieval)
   - [Asymmetric query/document embedding](#asymmetric-querydocument-embedding)
   - [Hybrid search: BM25 + embeddings, fused by rank](#hybrid-search-bm25--embeddings-fused-by-rank)
+  - [Cross-encoder re-ranking, and the thing fusion structurally cannot do](#cross-encoder-re-ranking-and-the-thing-fusion-structurally-cannot-do)
+  - [When nothing is relevant enough](#when-nothing-is-relevant-enough)
 - [Generation & citations](#generation--citations)
+  - [Refusing to answer](#refusing-to-answer)
 - [Evaluation](#evaluation)
+  - [Knowing what it doesn't know](#knowing-what-it-doesnt-know)
 - [API](#api)
   - [Example](#example)
 - [Testing & quality gates](#testing--quality-gates)
@@ -77,10 +81,17 @@ deliberately don't overlap:
   resolved back to the exact retrieved passage in code (not trusted at
   face value), and an answer's groundedness score is computed from that,
   not asserted by the model itself.
-- **No paid API key required to run any of it end to end.** Embeddings run
-  locally (`BAAI/bge-small-en-v1.5`, CPU, ~130MB), the vector store is
-  embedded (Chroma, no server to run), and generation defaults to a local
-  Ollama model — see [Quickstart](#quickstart).
+- **It can say "I don't know", and that's measured too.** Retrieval always
+  produces a ranking; whether anything *in* that ranking is relevant is a
+  separate question, and one a rank-fusion score structurally cannot answer.
+  A cross-encoder re-ranking stage gives a score that can, and a floor
+  measured against 10 questions the corpus cannot answer decides where to
+  put it — see [When nothing is relevant enough](#when-nothing-is-relevant-enough).
+- **No paid API key required to run any of it end to end.** Embeddings and
+  re-ranking run locally (`BAAI/bge-small-en-v1.5` and
+  `cross-encoder/ms-marco-MiniLM-L-6-v2`, CPU, ~130MB and ~90MB), the vector
+  store is embedded (Chroma, no server to run), and generation defaults to a
+  local Ollama model — see [Quickstart](#quickstart).
 
 ## Glossary
 
@@ -124,6 +135,17 @@ already familiar with them.
 - **MRR (Mean Reciprocal Rank)**: rewards finding the right passage
   *early* — 1st place scores 1.0, 2nd place scores 0.5, 3rd scores 0.33,
   etc., averaged across all questions.
+- **Cross-encoder / re-ranker**: a model that reads the question and one
+  passage *together* and scores how well that passage answers it. More
+  accurate than an embedding comparison (which encodes each side
+  separately and never sees them together), and far slower — so it runs
+  over the ~20 candidates cheap retrieval already found, not the whole
+  corpus. See [Retrieval](#retrieval).
+- **Abstention**: declining to answer because nothing retrieved was
+  relevant enough. Needs a score that means the same thing from one
+  question to the next, which is what a cross-encoder provides and a
+  rank-based score like RRF cannot — see
+  [When nothing is relevant enough](#when-nothing-is-relevant-enough).
 
 **Generation**
 - **LLM**: a large language model (e.g. a GPT/Llama/Qwen-family model) —
@@ -159,15 +181,21 @@ flowchart TD
         R["retriever.py<br/>top-k similarity search"]
         B["bm25.py<br/>lexical search"]
         RRF["RRF fusion<br/>1/(60 + rank)"]
+        RR["rerank.py<br/>cross-encoder score ≥ 0.2"]
         G["generate.py<br/>LLM + citation extraction"]
+        A["abstain<br/>no LLM call"]
         Q --> E2 --> R --> RRF
         Q -->|"hybrid mode"| B --> RRF
+        RRF -->|"hybrid_rerank mode"| RR
         RRF --> G
+        RR -->|"something cleared the floor"| G
+        RR -->|"nothing did"| A
     end
 
     S1 -.->|"read at query time"| R
     S1 -.->|"indexed at startup"| B
     G -->|"answer + citations + passages"| Q
+    A -->|"refusal, abstained: true"| Q
 
     subgraph Eval["📊 eval/run_eval.py"]
         GS["golden_set.yaml<br/>38 hand-verified Q&A"]
@@ -182,7 +210,7 @@ flowchart TD
     classDef eval fill:#de4c36,stroke:#a6371f,color:#ffffff
 
     class F,C,E1,S1 ingest
-    class Q,E2,R,B,RRF,G query
+    class Q,E2,R,B,RRF,RR,G,A query
     class GS,M eval
 ```
 
@@ -200,12 +228,21 @@ Three stages, each independently testable and independently swappable.
   Chroma collections — `/ask` picks one per request (`strategy` field),
   and `eval.run_eval` scores both from the same golden set in one run.
 - **Retrieval mode is a dimension of the eval, not a switch someone flipped
-  once.** `dense` and `hybrid` (BM25 + RRF) are both first-class at query
-  time, and `eval.run_eval` scores every strategy × mode pair in one run —
-  four rows, from the same golden set. That's what turned "hybrid search
-  should help" into the far more specific finding in
-  [Evaluation](#evaluation): it helps one chunking strategy and does nothing
-  for the other.
+  once.** `dense`, `hybrid` (BM25 + RRF) and `hybrid_rerank` (+ cross-encoder)
+  are all first-class at query time, and `eval.run_eval` scores every
+  strategy × mode pair in one run — six rows, from the same golden set.
+  That's what turned "hybrid search should help" into the far more specific
+  finding in [Evaluation](#evaluation): it helps one chunking strategy and
+  does nothing for the other. The same harness is what makes re-ranking's
+  own trade-off measurable rather than assumed.
+- **Refusing to answer is a retrieval decision, made in code.** Fusion can
+  rank candidates against each other but not judge whether the best of them
+  is any good, so `hybrid_rerank` adds a cross-encoder whose score *is*
+  comparable across questions, and drops everything below a measured floor.
+  Retrieving nothing then means "nothing here is relevant", and
+  `generate.py` returns a fixed refusal without ever calling the LLM — the
+  prompt's "say so if you can't answer" rule becomes something the system
+  enforces rather than something it asks for.
 - **Generation never trusts its own citations.** `generate.py` extracts
   every `[source: N]` marker with a regex and resolves `N` against the
   actual list of retrieved passages in Python — a citation to an index
@@ -218,10 +255,12 @@ Three stages, each independently testable and independently swappable.
 doc-qa-agent/
 ├── pyproject.toml              # single source of truth for deps (uv-managed)
 ├── Makefile                    # make fetch / build / eval / api / test
+├── .env.example                # LLM provider options + every DOCQA_ override
 ├── src/
-│   ├── common/schemas.py       # shared data models (ingestion ↔ retrieval ↔ generation ↔ API)
+│   ├── common/
+│   │   ├── schemas.py          # shared data models (ingestion ↔ retrieval ↔ generation ↔ API)
+│   │   └── config.py           # typed, env-overridable settings — read by every stage
 │   ├── ingestion/
-│   │   ├── config.py           # typed, env-overridable settings
 │   │   ├── fetch.py            # pinned corpus fetch + Markdown cleanup
 │   │   ├── chunking.py         # fixed-size AND markdown-aware chunkers
 │   │   ├── embed.py            # BGE-small wrapper (asymmetric query/doc embedding)
@@ -229,22 +268,33 @@ doc-qa-agent/
 │   │   └── build.py            # orchestrates fetch → chunk → embed → store
 │   ├── retrieval/
 │   │   ├── bm25.py             # lexical index over the same chunks (rank-bm25)
-│   │   └── retriever.py        # dense search, + BM25 and RRF fusion in hybrid mode
+│   │   ├── rerank.py           # cross-encoder re-scoring + the calibrated relevance score
+│   │   └── retriever.py        # dense search, + BM25/RRF fusion, + re-ranking and the floor
 │   ├── generation/
 │   │   ├── llm.py              # chat model construction (local-first, mirrors finrisk-agent)
 │   │   ├── prompt.py           # the grounding contract shown to the LLM
-│   │   └── generate.py         # citation extraction + groundedness scoring
+│   │   └── generate.py         # citation extraction, groundedness scoring, abstention
 │   └── api/app.py              # FastAPI app: POST /ask, GET /health
 ├── data/
 │   ├── raw/                    # the pinned corpus — committed (small, text-only, reproducible)
 │   └── chroma/                 # the vector store — gitignored, rebuilt via `ingestion.build`
 ├── eval/
 │   ├── golden_set.yaml         # 38 hand-verified Q&A pairs against the real corpus
-│   └── run_eval.py             # precision@k / recall@k / MRR / groundedness, per strategy
-├── tests/                      # pytest: hermetic (fake embedder/LLM), + 1 real-model integration file
+│   ├── out_of_domain.yaml      # 10 questions the corpus cannot answer — scores the abstention
+│   └── run_eval.py             # precision@k / recall@k / MRR / groundedness / abstention rates
+├── tests/                      # pytest: hermetic (conftest.py's fake embedder/reranker/LLM),
+│                               #   + 1 real-model integration file
 ├── docker/Dockerfile           # bakes the corpus + vector store in at build time (see below)
 └── .github/workflows/ci.yml    # lint, typecheck, build the store, test — on every push
 ```
+
+`config.py` sits in `common/` beside `schemas.py`, not in `ingestion/`:
+retrieval, generation and the eval harness all read it, so it belongs to
+none of them in particular. `embed.py` and `store.py` stay in `ingestion/`
+on the opposite reasoning — a query must be embedded by the same model that
+embedded the documents, and the store is ingestion's own output artifact, so
+both are ingestion decisions that query time is obliged to match rather than
+shared utilities.
 
 ## Quickstart
 
@@ -385,6 +435,7 @@ for testing:
 |---|---|
 | `dense` | Embed the question, cosine-similarity top-k against the collection |
 | `hybrid` (default) | The same dense search, **plus** a BM25 lexical search over the same chunks, the two rankings combined by reciprocal rank fusion |
+| `hybrid_rerank` | The fused candidates re-scored by a cross-encoder, and dropped entirely if none clears a relevance floor — the only mode that can decline to answer |
 
 ### Asymmetric query/document embedding
 
@@ -451,6 +502,54 @@ Whether any of this actually helps is a measured number, not a claim — see
 [Evaluation](#evaluation), where it turns out to depend entirely on which
 chunking strategy it's paired with.
 
+### Cross-encoder re-ranking, and the thing fusion structurally cannot do
+
+RRF combines two *orderings*. It never looks at the question and a passage
+together — it knows BM25 put a chunk second and the dense search put it
+fourth, and nothing else. So it can say which candidate is best, but not
+whether the best one is any good. Ask this system something the FastAPI docs
+never cover and `hybrid` still returns a confidently-ordered top 5, because
+a ranking always has a first element.
+
+`hybrid_rerank` adds a second stage over the fused candidates:
+`cross-encoder/ms-marco-MiniLM-L-6-v2` reads the question and each passage
+**in one forward pass**, with full attention between them. That's far more
+accurate than comparing two independently-computed vectors, and far too slow
+to run over a corpus — 693 chunks per query instead of 20 — which is exactly
+why it belongs after cheap retrieval has narrowed the field, not instead of
+it. ~22M parameters, ~90MB, CPU, and no new dependency: `sentence-transformers`
+was already here for the embedder.
+
+**The sigmoid is applied in our code, deliberately** (`rerank.py::_sigmoid`).
+The checkpoint is a regression model whose raw output is an unbounded logit —
+−11.3 to +8.6 measured on this corpus. Left as logits it still *ranks* correctly,
+so re-ranking alone would work fine. The relevance floor below would not: a
+threshold on an unbounded scale has no natural zero, no bounded range, and no
+meaning that can be stated in a sentence. Squashing to [0, 1] is what turns
+"score 4.9" into "0.99 relevant", and it is order-preserving, so it costs the
+ranking nothing.
+
+### When nothing is relevant enough
+
+A cross-encoder score is comparable **across questions**, which neither
+first-stage score is. That single property is what the abstention is built
+on: candidates scoring below `config.rerank_min_score` (**0.2**, measured —
+see [Evaluation](#evaluation)) are dropped, and when nothing clears the floor
+retrieval returns nothing at all. `generate.py` turns that into a fixed
+refusal **without calling the LLM**, so the prompt's "say so if the passages
+don't contain enough information" rule stops depending on the model choosing
+to follow it.
+
+**`dense` and `hybrid` deliberately get no floor.** A cosine similarity is
+only semi-calibrated, and an RRF score is a pure function of rank positions
+with no absolute meaning whatsoever — a passage ranked first by both
+retrievers scores 2/61 whether it answers the question perfectly or is merely
+the least-bad chunk in a corpus that has nothing to say. A threshold on
+either would be a number with no defensible origin, and inventing one is the
+kind of thing this repo is trying not to do. Knowing when to abstain is a
+capability the re-ranker buys, not a property of retrieval in general — and
+what it costs is in the evaluation table.
+
 ## Generation & citations
 
 `generation/prompt.py` shows the LLM a numbered list of retrieved
@@ -495,6 +594,23 @@ requested, so the stricter rule was kept instead (see
 `generation/generate.py`'s module docstring and `tests/test_generate.py`
 for a real captured example of both).
 
+### Refusing to answer
+
+The system prompt's rule 2 asks the model to say so when the passages don't
+contain enough information. That's an instruction, enforced by nothing — and
+"follow this rule about your own ignorance" is close to the least reliable
+thing you can ask a 7B model to do, precisely because the passages it was
+handed always *look* like an answer.
+
+So the decision is made before the model is involved. When retrieval comes
+back empty — which, in `hybrid_rerank`, means nothing cleared the relevance
+floor (see [Retrieval](#retrieval)) — `generate_answer` returns immediately
+with a fixed refusal, `abstained: true`, no citations, and **no LLM call at
+all**. A canned string can't hallucinate, and a model that would have ignored
+rule 2 never gets the opportunity. The same branch also covers the
+uninteresting case of an empty collection, which is why the message names the
+documentation rather than the passage list.
+
 `generation/llm.py::build_llm` mirrors `agent/agent.py::_build_llm` in the
 finrisk-agent sibling project (Azure OpenAI > local server > plain
 OpenAI), with one deliberate difference: **the local server is the
@@ -509,20 +625,26 @@ API cost.
 [eval/golden_set.yaml](eval/golden_set.yaml) were written by hand against
 the actual fetched corpus (not from memory) — every `expected_sources`
 entry is a real file in `data/raw/`, checked programmatically to exist.
-`eval/run_eval.py` scores every chunking strategy × retrieval mode against
-this set in one run — four configurations, same questions, same scoring
-code:
+A second, smaller set of 10 questions in
+[eval/out_of_domain.yaml](eval/out_of_domain.yaml) exists for the opposite
+purpose: the corpus *cannot* answer them, and the only correct response is
+a refusal. `eval/run_eval.py` scores every chunking strategy × retrieval
+mode against both in one run — six configurations, same questions, same
+scoring code:
 
-Numbers below are from an actual run of `uv run python -m eval.run_eval`
-(38 questions, k=5, `qwen2.5:7b-instruct` via Ollama for generation) — not
-rounded to look better:
+Numbers below are from an actual run of
+`uv run python -m eval.run_eval --sweep` (38 + 10 questions, k=5,
+`qwen2.5:7b-instruct` via Ollama for generation) — not rounded to look
+better:
 
-| Metric | Fixed / dense | Fixed / hybrid | Markdown / dense | Markdown / hybrid |
+| Configuration | Precision@5 | Recall@5 | MRR | Mean groundedness |
 |---|---|---|---|---|
-| Precision@5 | 0.5632 | 0.5526 | 0.5789 | **0.5895** |
-| Recall@5 | 0.9737 | 0.9737 | 0.9342 | **1.0000** |
-| MRR | **0.9079** | 0.9053 | 0.8662 | 0.9035 |
-| Mean groundedness | 0.9868 | **1.0** | **1.0** | **1.0** |
+| fixed / dense | 0.5632 | 0.9737 | **0.9079** | 0.9868 |
+| fixed / hybrid | 0.5526 | 0.9737 | 0.9053 | **1.0000** |
+| fixed / hybrid_rerank | 0.4632 | 0.9211 | 0.7895 | 0.9868 |
+| markdown / dense | 0.5789 | 0.9342 | 0.8662 | **1.0000** |
+| **markdown / hybrid** ← default | **0.5895** | **1.0000** | 0.9035 | **1.0000** |
+| markdown / hybrid_rerank | 0.5632 | 0.9605 | 0.8487 | 0.9912 |
 
 **In plain terms — hybrid search is not a free upgrade, it's a pairing.**
 
@@ -538,24 +660,159 @@ rounded to look better:
   dilutes term frequency and BM25's length normalization penalizes it, so
   the lexical ranking is noisier and fusion pays for that noise.
 - **The groundedness column decides nothing here, and shouldn't be read as
-  if it did.** Three configurations tie at exactly 1.0 and the fourth sits
-  at 0.9868 — a single question's worth of difference over 38. It measures
-  whether the model *formats* its citations as asked and cites passages that
-  were really shown (see below), which the 7B model does reliably no matter
-  which passages retrieval hands it. There's direct evidence of the noise
-  floor in this repo's own history: the `fixed`/`dense` configuration is
-  unchanged by this feature, yet it scored **0.9803** in the earlier
-  two-column run and **0.9868** here — same passages, same prompt, different
-  sampled generations. Differences of that size in this row are run-to-run
-  variance, not a finding. The retrieval metrics, which are deterministic
-  and reproduced exactly across both runs, are the signal in this table.
+  if it did.** Four configurations tie at exactly 1.0 and the other two sit
+  at 0.9868 and 0.9912 — one or two questions' worth of difference over 38.
+  It measures whether the model *formats* its citations as asked and cites
+  passages that were really shown (see below), which the 7B model does
+  reliably no matter which passages retrieval hands it. There's direct
+  evidence in this repo's own history: the `fixed`/`dense` configuration
+  scored **0.9803** in the earliest two-column run and **0.9868** in every
+  run since, on the same passages and the same prompt. Differences of that
+  size in this column are not a finding.
+
+  **But "sampling noise" is the wrong name for it, and the harness can now
+  prove that.** `temperature=0` is greedy decoding, so a fixed environment
+  is reproducible: two consecutive full runs of
+  `run_eval.py --sweep` produced **byte-identical** `eval_report.json` *and*
+  `eval_details.md` — same MD5, all 228 generated answers included. Within
+  one setup this column doesn't drift at all. So whatever moved 0.9803 to
+  0.9868 between those two historical runs was the environment changing
+  underneath it (a model re-pull, a server upgrade), not the dice. The
+  practical advice is unchanged — don't read a one-question difference here
+  as a result — but the reason is that the number is reproducible *given* an
+  environment, and only comparable across identical ones. The retrieval
+  metrics are stronger still: deterministic by construction, and reproduced
+  exactly across three runs spanning two features.
+
+**Re-ranking makes retrieval worse on this corpus, and buys the only thing
+that can refuse to answer.** Both re-ranked rows lose on every retrieval
+metric — markdown drops precision 0.5895 → 0.5632, recall 1.0000 → 0.9605,
+MRR 0.9035 → 0.8487; fixed drops harder, MRR 0.9053 → 0.7895. That is not
+the advertised result for a cross-encoder, and it is worth being precise
+about where it comes from, because two separate effects are stacked in
+those cells. Re-running with the floor disabled (`min_rerank_score=0.0`)
+separates them:
+
+| Effect (markdown) | Precision@5 | Recall@5 | MRR |
+|---|---|---|---|
+| `hybrid` — fusion only | 0.5895 | 1.0000 | 0.9035 |
+| + cross-encoder re-ordering (floor off) | 0.5789 | 0.9605 | 0.8487 |
+| + relevance floor at 0.2 | 0.5632 | 0.9605 | 0.8487 |
+
+- **Re-ordering causes nearly all of it.** The cross-encoder disagrees with
+  the fused ranking and is, on this corpus, usually wrong to. It's trained on
+  MS MARCO — short web passages answering natural-language web queries — and
+  asked here to judge API-reference prose full of code blocks, decorators and
+  identifiers. That's a domain shift, and a 22M-parameter model has little
+  capacity to absorb one. A FastAPI-tuned re-ranker would likely invert this
+  result; a general-purpose small one does not.
+- **The floor costs a little precision, and it is not paid where you'd
+  expect.** No golden question was refused outright (`abstention_rate`
+  0.0000 in every row), so the loss isn't refusals — it's individual
+  *relevant* passages scoring below 0.2 and being dropped from an answer that
+  still gets produced. `precision@5` divides by 5 regardless of how many
+  passages survive, so gating a relevant chunk costs precision directly. For
+  the fixed collection it also cost recall (0.9342 → 0.9211): on one question,
+  the only chunk from an expected file scored below the floor.
+
+**So `hybrid_rerank` is not the default, and the table is why.** It is the
+only mode that can decline to answer, and on this corpus that capability
+costs measurable ranking quality. Both facts belong in the same sentence.
+
+
+### Knowing what it doesn't know
+
+The golden set measures whether the right passage comes back. This measures
+the opposite obligation — noticing that *no* passage is right:
+
+| Configuration | Relevance floor | False abstention (38 in-domain) | Correct abstention (10 out-of-domain) |
+|---|---|---|---|
+| `dense` / `hybrid`, both strategies | none | 0.0000 | 0.0000 |
+| fixed / hybrid_rerank | 0.2 | **0.0000** | **0.6000** |
+| markdown / hybrid_rerank | 0.2 | **0.0000** | **0.6000** |
+
+The first row is not a failure, it's an incapacity, and reporting it as
+`threshold: null` rather than `0.0` is deliberate: those modes score 0.0000
+because they *cannot* abstain, not because they weighed these ten questions
+and chose to answer. Every one of the 10 out-of-domain questions gets a
+confident top-5 from them.
+
+**Where the threshold comes from.** `--sweep` scores the whole grid in one
+retrieval pass (the gate depends only on the *best* candidate's score, so
+every threshold can be evaluated against one recorded number per question):
+
+| Threshold | False abstention | Correct abstention | |
+|---|---|---|---|
+| 0.001 | 0.0000 | 0.4000 | |
+| 0.005 | 0.0000 | 0.5000 | |
+| 0.02 | 0.0000 | 0.6000 | |
+| **0.2** | **0.0000** | **0.6000** | ← chosen |
+| 0.3 | 0.0263 | 0.6000 | first false abstention |
+| 0.5 | 0.0263 | 0.7000 | |
+
+(markdown collection; the fixed one is within one question of this
+everywhere — full grid for both in `eval_report.json`. Its bounds are
+0.2517 lowest in-domain and 0.9926 highest out-of-domain, against markdown's
+0.2514 and 0.9722.)
+
+**0.2 is the conservative end of a plateau, not the optimum of a curve.**
+Everything from 0.02 to 0.2 scores identically (0.0000 / 0.6000), so the
+choice within that band is free, and 0.2 is picked for margin: the lowest
+in-domain score measured is **0.2514**, so the floor sits ~20% below the
+closest real question rather than flush against it. Pushing to 0.3 would buy
+nothing and start refusing real questions; 0.5 would trade one false
+abstention for one extra catch, which is the wrong trade for a documentation
+assistant — silently refusing a question the docs *do* answer is worse than
+answering an off-topic one from visibly irrelevant passages.
+
+**Being honest about what "tuned" means here.** The floor is chosen against
+the same 38 golden questions it is then scored on, so its 0.0000 false-
+abstention rate is optimistic by construction — that is exactly the
+objection this README raises against tuning `rrf_k`, and it applies here
+too. Two things make it a different case rather than a hypocritical one: the
+*benefit* side is measured on 10 questions the golden set does not contain,
+and the choice is a plateau rather than a peak, so it isn't balanced on a
+knife-edge of the tuning data. The honest summary is that 0.6000 is a real
+measurement and 0.0000 is an upper bound on how well the gate behaves.
+
+**The 4 it misses are the interesting ones.** Per-question re-rank scores
+against the markdown collection:
+
+| Out-of-domain question | Top re-rank score | Verdict at floor 0.2 |
+|---|---|---|
+| "Django middleware that adds a response header" | **0.9722** | answered — from `tutorial/middleware.md` |
+| "What changed in FastAPI 0.200?" | 0.7609 | answered — from `tutorial/body-nested-models.md` |
+| "Flask blueprint, register it on the app" | 0.6789 | answered — from `tutorial/bigger-applications.md` |
+| "Create a PostgreSQL index for a slow query" | 0.3917 | answered — from `advanced/advanced-dependencies.md` |
+| "DRF serializer to validate incoming data" | 0.0155 | refused |
+| "Spring Boot REST controller in Java" | 0.0017 | refused |
+| "Train a random forest with scikit-learn" | 0.0001 | refused |
+| "Docker image vs. container" | 0.0000 | refused |
+| "Capital of Australia" | 0.0000 | refused |
+| "Limerick about a cat" | 0.0000 | refused |
+
+The split is not random and it is not about difficulty — it's about *topical
+overlap*. Everything the gate catches is scored at essentially zero; the four
+it misses are the four that genuinely resemble FastAPI questions. A
+cross-encoder scores **relevance, not answerability**, and
+`tutorial/middleware.md` really is the most relevant page in this corpus to a
+question about middleware — it just happens to be about the wrong framework.
+Asking "how do I write a Django middleware?" gets 0.9722 because that answer
+is *nearly* there, which is the same reason it's the most dangerous question
+in the set. Catching that class of failure needs a model that can tell
+"relevant to this topic" from "answers this question", which a relevance
+re-ranker is not, at any threshold.
 
 **Why `markdown` + `hybrid` is the default.** It's the only configuration
-that is best-or-tied on three of the four metrics, and the only one with
-perfect recall. But the honest reading of the fixed-size columns is that
-hybrid retrieval **is not universally worth it** — precisely the assumption
+that is best-or-tied on three of the four metrics in the first table, and
+the only one with perfect recall. But the honest reading of the other rows
+is that neither added stage **is universally worth it** — hybrid fusion
+helps one chunking strategy and mildly hurts the other, and re-ranking hurts
+both while buying a capability neither has. That is precisely the assumption
 this project exists to avoid making. Run against the fixed-size collection
-alone, the same harness would have said "don't ship this."
+alone, the same harness would have said "don't ship hybrid"; run without the
+out-of-domain set, it would have said "don't ship re-ranking" — and with it,
+the answer becomes "ship it, not as the default, and say what it costs."
 
 **Precision@5 is capped well below 1.0 by the metric's own denominator,
 not by a retrieval flaw.** 34 of 38 questions expect exactly one source
@@ -564,7 +821,7 @@ still caps at 0.20 unless more chunks from that same file also land in
 the top 5. The actual ceiling (`min(5, chunks available from the expected
 file(s)) / 5`, averaged over all 38 questions) is **0.868** (fixed) and
 **0.989** (markdown) — most expected files are long enough to contribute
-5+ chunks — so the achieved 0.553–0.589 across all four configurations
+5+ chunks — so the achieved 0.463–0.589 across the six configurations
 reflects real retrieval headroom, not a metric artifact. Recall@5 and MRR
 are the more informative numbers for this golden set's mostly-single-source
 structure, and they're where the dense/hybrid difference actually shows up.
@@ -584,13 +841,27 @@ structure, and they're where the dense/hybrid difference actually shows up.
   [Generation & citations](#generation--citations)). A syntactic proxy,
   not a semantic check: it can't verify the cited passage actually *says*
   what the claim asserts.
+- `false / correct abstention rate`
+  (`eval/run_eval.py::abstention_metrics`): a question counts as refused
+  when retrieval returns nothing at all. Refusing one of the 38 golden
+  questions is a false abstention; refusing one of the 10 in
+  [eval/out_of_domain.yaml](eval/out_of_domain.yaml) is a correct one. Both
+  are retrieval-only, so they're computed even under `--skip-generation`.
+- **Abstentions are excluded from `mean_groundedness`, not scored as 0.0.**
+  A refusal contains no citations, so the groundedness scorer would return
+  0.0 for it — and averaging that in would penalize a mode precisely for
+  declining to answer what it couldn't answer, making a correct refusal
+  arithmetically indistinguishable from a hallucination. The count is
+  reported next to the mean (`abstention_rate`) so the excluded rows stay
+  visible rather than quietly leaving the denominator.
 
 ```bash
 uv run python -m eval.run_eval                    # full report: retrieval + generation
 uv run python -m eval.run_eval --skip-generation   # retrieval only, no LLM required (what CI runs)
+uv run python -m eval.run_eval --sweep             # + the relevance-floor grid below
 ```
 
-**Trusting these numbers without re-reading 152 raw outputs by hand** —
+**Trusting these numbers without re-reading 228 raw outputs by hand** —
 two checks, not one. The scoring functions are unit-tested against small,
 hand-computed cases with a known right answer (`tests/test_eval.py`,
 `tests/test_generate.py`) — e.g. `retrieval_metrics` is checked against a
@@ -620,10 +891,11 @@ questions and the check, so this isn't a truly independent verification.
 A more corpus-blind signal, and one that got stronger with hybrid search:
 every question's expected file now appears in the top-5 of the
 markdown/hybrid configuration — recall 1.0000, 38 of 38 — and none is
-missing from *all* four configurations. A genuinely wrong file would have
+missing from *all* six configurations. A genuinely wrong file would have
 no particular reason to keep surviving two independently-chunked retrievers
-searched two independent ways, one of which matches on literal terms rather
-than on meaning.
+searched three independent ways — one matching on literal terms rather than
+on meaning, and one re-read by a separately-trained cross-encoder that
+shares no weights with the embedder.
 
 ## API
 
@@ -633,8 +905,13 @@ uv run uvicorn api.app:app --reload --port 8000
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /ask` | `{"question": str, "top_k": int = 5, "strategy": "fixed" \| "markdown" = "markdown", "mode": "dense" \| "hybrid" = "hybrid"}` → `{answer, citations, passages, groundedness_score}` |
+| `POST /ask` | `{"question": str, "top_k": int = 5, "strategy": "fixed" \| "markdown" = "markdown", "mode": "dense" \| "hybrid" \| "hybrid_rerank" = "hybrid"}` → `{answer, citations, passages, groundedness_score, abstained}` |
 | `GET /health` | Liveness check |
+
+An abstention is a normal `200`, not an error: `abstained: true`, an empty
+`passages` list, and a refusal in `answer` (see
+[Generation & citations](#generation--citations)). Only `hybrid_rerank` can
+produce one.
 
 No frontend — the effort here is retrieval/generation/evaluation, not a
 second UI on top of what finrisk-agent's dashboard already demonstrates.
@@ -678,7 +955,8 @@ curl -X POST localhost:8000/ask -H "Content-Type: application/json" \
       "score": 0.01639344262295082
     }
   ],
-  "groundedness_score": 1.0
+  "groundedness_score": 1.0,
+  "abstained": false
 }
 ```
 
@@ -686,6 +964,47 @@ Every claim in `answer` is followed by a `[source: N]` marker; `citations`
 resolves each one back to the exact file and section it came from, and
 `groundedness_score` is computed from that resolution (see
 [Evaluation](#evaluation)) — not asserted by the model.
+
+The same endpoint in `hybrid_rerank` mode, asked something the corpus
+doesn't cover:
+
+```bash
+curl -X POST localhost:8000/ask -H "Content-Type: application/json" \
+  -d '{"question": "How do I train a random forest in scikit-learn?", "mode": "hybrid_rerank"}'
+```
+
+```json
+{
+  "question": "How do I train a random forest in scikit-learn?",
+  "answer": "I couldn't find anything in the FastAPI documentation relevant to this question, so I won't try to answer it.",
+  "citations": [],
+  "passages": [],
+  "groundedness_score": 0.0,
+  "abstained": true
+}
+```
+
+No LLM was called to produce that. The best candidate the fused ranking
+could offer scored 0.0001 against a floor of 0.2 (see
+[Retrieval](#retrieval)), so retrieval returned nothing and the refusal is a
+fixed string.
+
+**And in `hybrid` mode, the identical question is answered** — from
+`tutorial/query-params-str-validations.md` and `tutorial/path-params.md`, on
+a question about scikit-learn. In this particular case the 7B model did the
+right thing with them:
+
+> The provided passages do not contain information on how to train a random
+> forest in scikit-learn. [source: 1] and [source: 2] focus on FastAPI
+> examples and do not address machine learning or scikit-learn.
+
+That is rule 2 of the system prompt working, and it's worth being clear that
+it often does. The difference the floor makes is not that refusal becomes
+possible — it's that refusal stops being a thing the model may or may not
+choose to do on any given sampling, at the cost of an LLM call, while
+returning two irrelevant passages to the caller either way. One path is a
+deterministic guarantee; the other is a well-behaved model. Only one of them
+is a property of the system.
 
 **Those `score` values are RRF scores, and they're readable.** In hybrid
 mode `score` is the fused `Σ 1/(60 + rank)`, not a cosine similarity, so the
@@ -699,28 +1018,48 @@ would have dropped. In `dense` mode the same field is a plain cosine
 similarity (≈0.84 for this question), which is why its description says
 "relevance score" rather than naming either one.
 
+**`hybrid_rerank` adds a second score rather than overwriting that one.**
+Passages then carry both `score` (still the fused RRF value, still readable
+the same way) and `rerank_score` (the cross-encoder's [0, 1] relevance), and
+are ordered by the latter. Keeping both is what makes the second stage
+legible: you can see what fusion thought, what the re-ranker thought, and
+where they disagreed. `rerank_score` is `null` in the two modes that don't
+re-rank.
+
 ## Testing & quality gates
 
 ```bash
-uv run pytest          # 121 tests, hermetic except one file (see below)
+uv run pytest          # 165 tests, hermetic except one file (see below)
 uv run ruff check src tests eval
 uv run ruff format --check src tests eval
 uv run mypy src tests eval
 ```
 
 **Hermetic by design**: every test except `tests/test_integration.py`
-uses `FakeEmbedder` (deterministic, hash-based) and `FakeChatModel`
-(canned response) instead of the real BGE model or a real LLM — no
-network, no Ollama, no API key needed to run the suite, and it runs in
-seconds. The one exception to "no network" too is `test_fetch_network.py`,
-which exercises `ingestion/fetch.py`'s HTTP-calling code with
-`httpx.MockTransport` — httpx's own offline-testing mechanism, no real
-request, no extra dependency. `test_integration.py` is the one place the
-real `BAAI/bge-small-en-v1.5` model gets exercised (marked `integration`,
-still run by CI by default — downloading a free, ~130MB local model isn't
-the kind of external-service dependency the rest of the suite avoids); one
-test in that file additionally checks the real, already-built
-`data/chroma` store and is skipped gracefully if it hasn't been built yet.
+uses `FakeEmbedder` (deterministic, hash-based), `FakeReranker` (relevance
+scores dictated per chunk id) and `FakeChatModel` (canned response) instead
+of the real models or a real LLM — no network, no Ollama, no API key needed
+to run the suite, and it runs in seconds. The one exception to "no network"
+too is `test_fetch_network.py`, which exercises `ingestion/fetch.py`'s
+HTTP-calling code with `httpx.MockTransport` — httpx's own offline-testing
+mechanism, no real request, no extra dependency. `test_integration.py` is
+the one place the real `BAAI/bge-small-en-v1.5` and
+`cross-encoder/ms-marco-MiniLM-L-6-v2` models get exercised (marked
+`integration`, still run by CI by default — downloading free, ~130MB and
+~90MB local models isn't the kind of external-service dependency the rest of
+the suite avoids); one test in that file additionally checks the real,
+already-built `data/chroma` store and is skipped gracefully if it hasn't
+been built yet.
+
+**Dictating the re-ranker's opinions is the point of faking it.** A relevance
+judgement is exactly the thing a test needs to state outright rather than
+discover: `FakeReranker({"lexical": 0.9}, default=0.01)` makes "this one
+passage is relevant and the rest are not" a premise, so the floor's behaviour
+— reordering, filtering, and returning nothing at all — is testable without
+asserting anything about what a real model happens to believe. What the real
+model does is checked separately, and only for the properties the code
+depends on: that its scores land in [0, 1] after the sigmoid, and that it
+ranks a topically relevant passage above an unrelated one.
 
 **Coverage: 99%** (`--cov=src --cov=eval`, up from an initial 80% that
 only measured `src/` — `eval/run_eval.py` had tests from the start but
@@ -747,13 +1086,14 @@ and PR, mirroring finrisk-agent's own quality bar exactly.
 | Embeddings | `BAAI/bge-small-en-v1.5` (local, CPU, `sentence-transformers`) | A strong small (384-dim, ~130MB) retrieval-tuned model — no API key, no GPU required, runs the whole corpus in under a minute on CPU. Its asymmetric query-instruction convention is applied explicitly (see [Retrieval](#retrieval)) rather than ignored, which is where most of its retrieval quality actually comes from. |
 | Lexical search | `rank-bm25` (`BM25Okapi`), index built in memory from Chroma | The de facto standard BM25 implementation in Python — pure Python, no dependency beyond the `numpy` chromadb already pulls in, and the same reasoning as using the real `RecursiveCharacterTextSplitter` rather than a hand-rolled lookalike: a textbook algorithm with a named, standard implementation isn't where hand-rolling earns anything. Indexing from `ChunkStore.get_all()` rather than persisting a second artifact keeps ingestion the only thing that writes to disk. |
 | Rank fusion | Reciprocal Rank Fusion, `k=60`, hand-rolled (~10 lines) | Cosine similarity and BM25 scores aren't on a comparable scale, so score-level fusion would require inventing a normalization and a weight; RRF needs neither (see [Retrieval](#retrieval)). It's a one-line formula over two rankings — a dependency for that would be more code to read, not less, and keeping it local makes it directly unit-testable against hand-computed values. |
+| Re-ranking | `cross-encoder/ms-marco-MiniLM-L-6-v2` via `sentence-transformers` | The smallest widely-used cross-encoder (~22M params, ~90MB) that still does the thing a bi-encoder can't: read question and passage together in one pass. Decisively, it needs **no new dependency** — `sentence-transformers` was already here for the embedder, and is already in the narrow `mypy` override list — so the second retrieval stage costs the dependency tree nothing. A larger re-ranker (`bge-reranker-base`, ~1.1GB) would break the "clone and run on CPU in a few minutes" bar the rest of the stack is held to. What it's actually worth on this corpus is a measured number with an unflattering column — see [Evaluation](#evaluation). |
 | Vector store | Chroma, embedded (no server) | Zero infra to stand up — consistent with the "clone and run in a few minutes" bar already set by finrisk-agent. `PersistentClient` for the real corpus, `EphemeralClient` (in-memory) for every test, at zero extra code. |
 | Chunking (fixed) | `RecursiveCharacterTextSplitter` (`langchain-text-splitters`), sized via `tiktoken` | The de facto standard "MVP" chunker; using the actual named class rather than a hand-rolled equivalent is exactly what the "RecursiveCharacterTextSplitter-equivalent" brief calls for. Token-based (not character-based) sizing means "~500 tokens" means what it says regardless of how dense the prose is. |
 | Chunking (markdown) | Hand-rolled fence-aware header splitter | LangChain's own `MarkdownHeaderTextSplitter` corrupts code-block indentation by round-tripping through the `markdown` HTML library — see [Ingestion & chunking](#ingestion--chunking) for the concrete before/after. A ~40-line line scanner that tracks fence state avoids the bug entirely and is easier to reason about than fighting a general-purpose Markdown parser into not doing that. |
 | Generation LLM | Ollama (local, default) → Azure OpenAI → OpenAI | Mirrors `agent/agent.py::_build_llm` in finrisk-agent for stack consistency between the two portfolio projects, with the priority order reversed at the top so a local model is the actual default here (see [Generation & citations](#generation--citations)) rather than an opt-in. |
 | Citation format | Passage index (`[source: N]`), not verbatim file/section string | A small local LLM reliably reproduces a single digit; it does *not* reliably reproduce a long string with backticks and `>` breadcrumbs verbatim. Switching formats measurably fixed real, observed groundedness scores that were wrong for the right reason (see [Generation & citations](#generation--citations)) — this is documented as a design decision that changed after being run against a real small model, not a hypothetical. |
 | Corpus fetch | GitHub raw Markdown *source*, pinned tag | The actual docs-source files, not scraped rendered HTML — cleaner to parse, and pinning a tag (recorded in `data/raw/manifest.json`) is what keeps `golden_set.yaml`'s hand-written `expected_sources` valid indefinitely instead of drifting the moment the live site changes. |
-| Configuration | pydantic-settings | One typed, validated settings object (`ingestion/config.py`) shared by fetch/build/retrieval/eval, so they can't silently drift out of sync — same rationale as `ml_pipeline/config.py` in finrisk-agent. |
+| Configuration | pydantic-settings | One typed, validated settings object (`common/config.py`) shared by fetch/build/retrieval/eval, so they can't silently drift out of sync — same rationale as `ml_pipeline/config.py` in finrisk-agent. It sits in `common/` next to `schemas.py`, not in `ingestion/`, for the same reason: every stage reads it, so it belongs to none of them in particular. |
 | API | FastAPI | The framework this whole corpus documents, and a natural fit for a small, typed, single-endpoint service — `Retriever`/embedder are built once in `lifespan`, not per-request. |
 | Packaging & running | uv | Same reasoning as finrisk-agent: one fast tool for environments, installs and running scripts, working identically on Windows/macOS/Linux. |
 
@@ -769,16 +1109,28 @@ and PR, mirroring finrisk-agent's own quality bar exactly.
   in the numbers' own section** (see [Evaluation](#evaluation)) rather
   than only in code comments — a metric whose limitations aren't stated
   next to its headline number is easy to over-trust.
-- **All four configurations are scored by the exact same pipeline** —
+- **All six configurations are scored by the exact same pipeline** —
   `run_all` loops over `ChunkingStrategy` × `RetrievalMode` and calls
   `evaluate_question` the same way for each — so the only thing that differs
   between the columns in the [Evaluation](#evaluation) table is which
   collection got built and how it was searched, never how the result is
-  scored.
-- **Hybrid retrieval costs nothing when it isn't used.** `mode` is fixed
-  when a `Retriever` is constructed, not per call: a `dense` retriever never
-  builds a BM25 index, and the API builds all four once at startup rather
-  than paying for either on the request path.
+  scored. Adding `hybrid_rerank` to the enum added two columns and required
+  no change to any scoring code, which is the property that design was for.
+- **Each stage costs nothing when it isn't used.** `mode` is fixed when a
+  `Retriever` is constructed, not per call: a `dense` retriever never builds
+  a BM25 index, and only a `hybrid_rerank` one touches the cross-encoder. The
+  API builds all six retrievers once at startup — sharing a single embedder
+  and a single re-ranker between them, rather than letting each load its own
+  copy — so no request pays for a model it doesn't use.
+- **The relevance floor is tuned; `rrf_k` is not.** Both are constants in
+  `common/config.py`, and the difference in how they were chosen is
+  deliberate. `rrf_k=60` comes from the paper, because tuning it against the
+  same 38 questions it's scored on would just be fitting the eval set. The
+  floor can't be borrowed from anywhere, so it is swept against a *separate*
+  set of questions the golden set doesn't contain (`eval/out_of_domain.yaml`)
+  and the trade-off curve is published rather than just the winner — the
+  honest version of "tuned", where the reader can see what the other choices
+  would have cost.
 - **File-level, not chunk-level, retrieval ground truth.** The two
   chunking strategies produce different chunk boundaries for the same
   underlying text, so scoring "did the exact expected chunk come back" is
@@ -788,17 +1140,22 @@ and PR, mirroring finrisk-agent's own quality bar exactly.
 ## Out of scope
 
 Explicitly, to keep this project's effort where the brief asked for it:
-no frontend/UI, no cross-encoder reranking, no query expansion or
-rewriting, no authentication or multi-user support, no deployment
-infrastructure beyond what running the demo locally needs. All plausible
-follow-ups, none of them required to demonstrate retrieval + grounding +
-evaluation, which is what this repository is actually for.
+no frontend/UI, no query expansion or rewriting, no authentication or
+multi-user support, no deployment infrastructure beyond what running the
+demo locally needs. All plausible follow-ups, none of them required to
+demonstrate retrieval + grounding + evaluation, which is what this
+repository is actually for.
 
-*(Hybrid BM25 + vector search was on this list until it was built and
-measured — see [Retrieval](#retrieval) and [Evaluation](#evaluation). The
-measurement is why it stays: it takes the default configuration's recall to
-1.0000. It is also why the `dense` mode stays — hybrid measurably does not
-help the fixed-size collection.)*
+*(Two things have now left this list the same way, and the rule is the same
+both times: build it, measure it, then let the measurement decide. **Hybrid
+BM25 + vector search** earned the default slot, because it takes that
+configuration's recall to 1.0000 — while `dense` stays available precisely
+because the same measurement shows hybrid does *not* help the fixed-size
+collection. **Cross-encoder re-ranking** stays for a much less flattering
+reason: it makes every retrieval metric on this corpus worse, MRR most of
+all (0.9053 → 0.7895 on the fixed collection), and it is still the only way
+this system can decline to answer at all. So it ships as a third mode rather
+than as the default, with the cost stated next to the capability.)*
 
 ## License
 

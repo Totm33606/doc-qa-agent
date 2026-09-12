@@ -28,7 +28,7 @@ from datetime import UTC, datetime
 import httpx
 import typer
 
-from ingestion.config import config
+from common.config import config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)

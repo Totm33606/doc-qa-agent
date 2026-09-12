@@ -10,10 +10,12 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from common.schemas import ChunkingStrategy, DocChunk
-from ingestion.config import config
+import api.app as app_module
+from common.config import config
+from common.schemas import ChunkingStrategy, DocChunk, RetrievalMode
+from generation.generate import ABSTENTION_ANSWER
 from ingestion.store import ChunkStore
-from tests.conftest import FakeChatModel, FakeEmbedder
+from tests.conftest import FakeChatModel, FakeEmbedder, FakeReranker
 
 embedder = FakeEmbedder()
 
@@ -55,6 +57,7 @@ def hermetic_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> object:
     monkeypatch.setattr(config, "chroma_dir", tmp_path / "chroma")
     _seed_collections(config.chroma_dir)
     monkeypatch.setattr(app_module, "BGEEmbedder", lambda: embedder)
+    monkeypatch.setattr(app_module, "CrossEncoderReranker", lambda: FakeReranker(default=0.9))
     monkeypatch.setattr(
         "generation.generate.build_llm",
         lambda: FakeChatModel("Fixed paths must come before variable ones. [source: 1]"),
@@ -85,9 +88,9 @@ def test_ask_defaults_top_k_strategy_and_mode(hermetic_app: object) -> None:
     assert response.status_code == 200
 
 
-@pytest.mark.parametrize("mode", ["dense", "hybrid"])
+@pytest.mark.parametrize("mode", [m.value for m in RetrievalMode])
 def test_ask_serves_every_retrieval_mode(hermetic_app: object, mode: str) -> None:
-    """Both modes are wired to a real retriever at startup — neither 500s or comes back empty."""
+    """Every mode is wired to a real retriever at startup — none 500s or comes back empty."""
     with TestClient(hermetic_app) as client:  # type: ignore[arg-type]
         response = client.post(
             "/ask", json={"question": "Why does path order matter?", "mode": mode}
@@ -96,6 +99,38 @@ def test_ask_serves_every_retrieval_mode(hermetic_app: object, mode: str) -> Non
     assert response.status_code == 200
     body = response.json()
     assert body["passages"][0]["source_file"] == "tutorial/path-params.md"
+
+
+def test_ask_abstains_when_nothing_clears_the_relevance_floor(
+    monkeypatch: pytest.MonkeyPatch, hermetic_app: object
+) -> None:
+    """The whole path end to end: a re-ranker that finds nothing relevant, a 200 with an
+    explicit refusal, no passages, and no LLM call behind it."""
+    monkeypatch.setattr(app_module, "CrossEncoderReranker", lambda: FakeReranker(default=0.0))
+    monkeypatch.setattr(config, "rerank_min_score", 0.5)
+
+    with TestClient(hermetic_app) as client:  # type: ignore[arg-type]
+        response = client.post(
+            "/ask",
+            json={"question": "How do I train a random forest?", "mode": "hybrid_rerank"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["abstained"] is True
+    assert body["passages"] == []
+    assert body["citations"] == []
+    assert body["answer"] == ABSTENTION_ANSWER
+
+
+def test_ask_does_not_abstain_on_an_answerable_question(hermetic_app: object) -> None:
+    with TestClient(hermetic_app) as client:  # type: ignore[arg-type]
+        response = client.post(
+            "/ask",
+            json={"question": "Why does path order matter?", "mode": "hybrid_rerank"},
+        )
+
+    assert response.json()["abstained"] is False
 
 
 def test_ask_rejects_an_unknown_mode(hermetic_app: object) -> None:
