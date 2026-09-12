@@ -1,9 +1,6 @@
-"""Unit tests for the logit -> probability conversion the relevance floor is built on.
+"""Unit tests for `_sigmoid`, which gives the relevance floor a bounded scale.
 
-The re-ranker's *ordering* would work on raw logits. The floor would not: it
-needs a bounded scale with a fixed meaning, which is what `_sigmoid` provides
-and what these tests pin down. The real model's behaviour is checked
-separately in `tests/test_integration.py`.
+The real model is checked in `tests/test_integration.py`.
 """
 
 from __future__ import annotations
@@ -30,7 +27,6 @@ def test_sigmoid_is_monotonic() -> None:
 
 
 def test_sigmoid_survives_large_negative_logits() -> None:
-    """The naive formula overflows here — and this is exactly the range the floor
-    cares about, since it's what the model returns for irrelevant passages."""
+    """The naive formula overflows here."""
     assert _sigmoid(-800.0) == pytest.approx(0.0)
     assert _sigmoid(800.0) == pytest.approx(1.0)

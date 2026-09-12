@@ -20,7 +20,6 @@ eval/eval_details.md
 # Env
 .env
 .env.local
-uv.lock
 
 # OS / editor
 .DS_Store

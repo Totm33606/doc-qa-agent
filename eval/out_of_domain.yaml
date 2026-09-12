@@ -1,21 +1,7 @@
-# Out-of-domain evaluation set for DocQA-Agent.
-#
-# Questions the corpus in data/raw/ cannot answer. Where golden_set.yaml asks
-# "does the right passage come back?", this set asks the opposite question:
-# "does the agent notice when *no* passage is right?" — the failure mode a
-# retriever with no relevance floor cannot even detect, because fusion always
-# produces a confidently-ordered top-k whether or not anything in it is
-# relevant. See eval/run_eval.py (abstention metrics + threshold sweep) and
-# retrieval/retriever.py for what consumes this.
-#
-# The categories below are the realistic failure shapes, not arbitrary
-# variety. The hard ones are deliberately over-represented: `unrelated` is
-# easy for any threshold to catch and proves little, while `adjacent-framework`
-# and `shared-vocabulary` share most of their vocabulary with the corpus and
-# are exactly where a lexical retriever hands the fusion a confident wrong
-# answer.
-#
-# There is no `expected_answer` field: the only correct response is a refusal.
+# Out-of-domain evaluation set: questions the corpus in data/raw/ cannot answer, so the
+# only correct response is a refusal (hence no `expected_answer`). Weighted toward hard
+# cases (adjacent frameworks, shared vocabulary) over easy `unrelated` controls.
+# Used by eval/run_eval.py for the abstention metrics and the --sweep threshold grid.
 
 - id: ood01
   category: adjacent-framework
@@ -43,7 +29,7 @@
   question: |-
     How do I train a random forest classifier with scikit-learn and check its accuracy?
   why: |-
-    Shares "model", "train" and "parameters" with the corpus while being an entirely different domain — the case where token overlap is misleading rather than informative.
+    An entirely different domain phrased as a how-to question. Its distinctive terms ("train", "classifier", "accuracy") never appear in the corpus, so any overlap is limited to generic words.
 
 - id: ood05
   category: shared-vocabulary

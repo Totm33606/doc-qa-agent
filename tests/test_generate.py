@@ -149,10 +149,8 @@ def test_compute_groundedness_multi_index_marker_ungrounded_if_any_index_invalid
 
 
 def test_compute_groundedness_leading_citation_counts_for_nothing() -> None:
-    """A citation with nothing real before it ('[1] Claim.') doesn't grade anything — not
-    the (empty) text before it, and not the claim that follows either. It's simply not a
-    trailing citation for anyone. A deliberate design choice, not an oversight: see the
-    module docstring for why leniency here was tried and then removed."""
+    """A leading citation ('[1] Claim.') grades nothing — deliberately: citations must trail
+    the claim, as the prompt requires."""
     answer = "[source: 1] The only claim in this answer, cited up front."
     assert compute_groundedness(answer, PASSAGES) == 0.0
 
@@ -166,13 +164,9 @@ def test_compute_groundedness_leading_citation_does_not_rescue_the_next_claim() 
 
 
 def test_compute_groundedness_leading_citation_real_world_example() -> None:
-    """A real qwen2.5:7b-instruct answer (eval/eval_details.md, q06/fixed) that cites
-    every claim *before* it instead of after. Each leading marker counts for nothing; each
-    non-empty segment is graded by whichever marker trails it: "A FastAPI dependency is a
-    function..." is graded by [2] (valid), "It can return values..." by [4] (valid),
-    "Dependencies can have sub-dependencies..." by [5] (valid) — 3 grounded claims. The
-    final "Therefore, ..." restatement has no marker after it at all, so it's the 4th,
-    uncited, segment: 3/4 = 0.75."""
+    """A real qwen2.5:7b-instruct answer (q06/fixed) citing before each claim. The segments
+    after [1], [2] and [4] are graded by the next marker ([2], [4], [5], all valid); the
+    tail after [5] is uncited: 3/4."""
     answer = (
         "[1] A FastAPI dependency is a function that can take the same parameters as a "
         "path operation function. [2] It can return values or not, and can declare "

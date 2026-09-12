@@ -1,12 +1,6 @@
-"""The one place this suite touches the real models — everything else is hermetic.
+"""The only tests using the real embedder and cross-encoder (downloaded on first run).
 
-Marked `integration` (registered in pyproject.toml) purely so a local dev
-loop can skip it with `pytest -m "not integration"`; CI runs the full
-suite, including this file — downloading `BAAI/bge-small-en-v1.5` (~130MB)
-and `cross-encoder/ms-marco-MiniLM-L-6-v2` (~90MB), both free and needing
-no API key, is a one-time cost similar in kind to any other dependency
-download, not the kind of external-service dependency the rest of the suite
-avoids.
+Marked `integration`: skip locally with `pytest -m "not integration"`; CI runs them.
 """
 
 from __future__ import annotations
@@ -82,9 +76,7 @@ def _passage(chunk_id: str, text: str) -> RetrievedPassage:
 def test_real_reranker_scores_are_probabilities_in_the_unit_interval() -> None:
     """The relevance floor is a threshold on these, so the [0, 1] range is load-bearing.
 
-    It comes from the model having a single output label (sentence-transformers
-    then applies a sigmoid), which is a fact about the checkpoint rather than
-    about our code — so it is checked here rather than assumed.
+    The checkpoint returns raw logits; the range comes from `_sigmoid` in `rerank.py`.
     """
     scores = CrossEncoderReranker().score(
         "Why does the order of FastAPI path operations matter?",
@@ -96,8 +88,7 @@ def test_real_reranker_scores_are_probabilities_in_the_unit_interval() -> None:
 
 
 def test_real_reranker_on_no_passages_returns_nothing() -> None:
-    """Guards the empty-batch case: `CrossEncoder.predict([])` is not something to find out
-    about in production, and an abstention upstream can legitimately produce it."""
+    """Guards the empty-batch case (e.g. an empty collection)."""
     assert CrossEncoderReranker().score("anything", []) == []
 
 

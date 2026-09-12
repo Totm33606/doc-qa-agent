@@ -1,18 +1,8 @@
-"""The grounding contract: system prompt + how retrieved passages are shown to the LLM.
+"""System prompt and passage formatting for generation.
 
-Citations are by **passage index** (`[source: 2]`), not by copying the
-`source_file#section` string verbatim. An earlier version asked the model
-to reproduce that string exactly so `generate.extract_citations` could
-match it by simple equality — in practice, a 7B local model reliably
-mangles a long string with backticks and `>` breadcrumbs in it (dropping a
-segment, swapping `>` for `#`), which silently zeroed out the groundedness
-score even for answers that were, in substance, correctly sourced. A
-single digit copied from `[N]` right above the passage it refers to is
-something even a small local model reproduces reliably — the index is
-then resolved back to the exact `(source_file, section)` in code, in
-`generate.extract_citations`, so there's no loss of precision versus the
-verbatim-string approach, only a much more robust format for the model to
-actually produce.
+Citations are by passage index (`[source: 2]`), not by copying `file#section`: a local
+7B model reliably copies a digit but mangles long breadcrumbs. `generate.py` resolves
+the index back to the passage.
 """
 
 from __future__ import annotations

@@ -1,57 +1,17 @@
-"""Evaluate retrieval and generation against eval/golden_set.yaml, for every strategy x mode.
+"""Evaluate every chunking strategy x retrieval mode against the golden and out-of-domain sets.
 
-Mirrors `ml_pipeline/eval.py` in the finrisk-agent sibling project: load
-artifacts (here, the two Chroma collections built by `ingestion.build`),
-score against a held-out, hand-verified ground truth, and write a metrics
-report — `eval_report.json` here, `models/metrics.json` there.
+- Retrieval, at file level: precision@k, recall@k, MRR (1/rank of the first passage from
+  an expected file).
+- Generation: mean groundedness over answered questions (see `generation.generate`).
+- Abstention: false rate on `golden_set.yaml`, correct rate on `out_of_domain.yaml`.
+  `--sweep` adds the threshold grid `config.rerank_min_score` is chosen from.
 
-Six rows, not two: the two chunking strategies (`fixed`, `markdown`) are
-each scored in all three retrieval modes (`dense`, `hybrid`,
-`hybrid_rerank` — see `retrieval/retriever.py`), from the same golden set in
-one run. Adding BM25 alongside embedding search, and a cross-encoder on top
-of that, are retrieval design decisions like any other here, so what each is
-worth on this corpus is a measured number in the report, not an assumption
-baked into the default.
+`evaluate_question` produces one row per (question, strategy, mode); both the aggregates
+in `eval_report.json` and the transcript in `eval_details.md` are built from those rows.
 
-Retrieval metrics (per strategy x mode, at a fixed k):
-- **precision@k**: of the k passages retrieved, what fraction come from a
-  file the golden question actually expects.
-- **recall@k**: of the files the golden question expects, what fraction
-  appear anywhere in the top-k retrieved passages.
-- **MRR** (Mean Reciprocal Rank): 1/rank of the first retrieved passage
-  that comes from an expected file, averaged over all questions — rewards
-  putting a correct source *early*, which precision/recall at a fixed k
-  don't directly capture.
-
-Generation metric: mean groundedness (see `generation.generate`) over the
-same question set, computed once per (strategy, mode) pair using that
-pair's own retrieved passages — this is what lets the configurations be
-compared head-to-head on equal footing, not just on retrieval but on the
-answer quality retrieval enables downstream. Abstentions are excluded from
-that mean and reported as their own rate; see `generation_metrics`.
-
-Abstention metrics (per strategy x mode): the two error rates of refusing to
-answer, scored against `out_of_domain.yaml` as well as the golden set —
-`false_abstention_rate` (in-domain questions wrongly refused) and
-`correct_abstention_rate` (out-of-domain questions rightly refused). The
-`--sweep` flag additionally scores the whole grid of candidate thresholds,
-which is where `config.rerank_min_score` comes from.
-
-`evaluate_question` is the single source of truth behind every aggregate
-number: one question, one retrieval call, one (optional) generation call.
-`run_all` calls it once per (question, strategy, mode) triple, then
-`retrieval_metrics`/`generation_metrics` reduce those rows into the
-aggregate report — the same rows also feed `write_details_markdown`'s
-full per-question dump, so a suspicious mean is never more than one file
-away from the raw rows that produced it, without a second (and, for
-generation, non-deterministic) pass re-calling the LLM.
-
-Run: `uv run python -m eval.run_eval` (needs both collections already
-built via `uv run python -m ingestion.build`). Generation scoring calls
-the configured LLM (Ollama by default) once per question per (strategy,
-mode) pair — 6 x 38 calls for the full set — so pass `--skip-generation`
-to score retrieval only, e.g. in CI, where no LLM is available. Retrieval
-and abstention metrics are computed either way.
+Run: `uv run python -m eval.run_eval` (needs the collections from `ingestion.build`).
+Generation calls the LLM 6 x 38 times; `--skip-generation` scores retrieval and
+abstention only.
 """
 
 from __future__ import annotations
@@ -91,9 +51,7 @@ DETAILS_PATH = Path(__file__).parent / "eval_details.md"
 
 DEFAULT_K = 5
 
-# The grid the relevance floor is chosen from. Dense at the bottom because
-# that's where a cross-encoder puts everything it considers irrelevant: the
-# interesting differences are between 0.001 and 0.1, not between 0.5 and 0.9.
+# Relevance-floor candidates, dense near 0 where a cross-encoder scores irrelevant passages.
 THRESHOLD_GRID = (0.0, 0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.3, 0.5)
 
 
@@ -153,10 +111,7 @@ def evaluate_question(
         precision=precision,
         recall=recall,
         reciprocal_rank=reciprocal_rank,
-        # Retrieval returning nothing *is* the abstention — see the relevance
-        # floor in `retrieval/retriever.py`. It's recorded here rather than
-        # read off the generated answer so it survives `--skip-generation`.
-        abstained=not passages,
+        abstained=not passages,  # empty retrieval is the abstention, even with --skip-generation
         generated_answer=generated_answer,
         citations=citations,
         groundedness_score=groundedness_score,
@@ -181,14 +136,10 @@ def retrieval_metrics(
 def generation_metrics(
     results: list[QuestionResult], strategy: ChunkingStrategy, mode: RetrievalMode
 ) -> GenerationMetrics:
-    """Mean groundedness over the answered questions, plus how many were refused.
+    """Mean groundedness over answered questions, plus the abstention rate.
 
-    Abstentions are excluded from the mean rather than scored. An abstention
-    contains no citations, so `compute_groundedness` returns 0.0 for it — and
-    averaging that in would penalize a mode exactly for declining to answer
-    what it couldn't answer, which is the behaviour the relevance floor exists
-    to produce. The count is reported alongside so the excluded rows stay
-    visible instead of quietly vanishing from the denominator.
+    Abstentions are excluded: a refusal has no citations and would score 0.0, making a
+    correct refusal look like a hallucination.
     """
     scores = [
         r.groundedness_score
@@ -206,12 +157,7 @@ def generation_metrics(
 
 
 def abstained(retriever: Retriever, question: str, k: int = DEFAULT_K) -> bool:
-    """Whether the retriever declined to answer: retrieval coming back empty *is* the abstention.
-
-    Named rather than inlined because `not retriever.retrieve(...)` reads like
-    a defensive emptiness check at the call site, when it is in fact the whole
-    signal — see the relevance floor in `retrieval.retriever`.
-    """
+    """Whether the retriever declined to answer — an empty retrieval is the abstention."""
     return not retriever.retrieve(question, top_k=k)
 
 
@@ -222,18 +168,10 @@ def abstention_metrics(
     in_domain: list[QuestionResult],
     out_of_domain_abstained: list[bool],
 ) -> AbstentionMetrics:
-    """Reduce both question sets to the two error rates of refusing to answer.
+    """Reduce both question sets to the false and correct abstention rates.
 
-    A pure reduction, like `retrieval_metrics` and `generation_metrics`: every
-    retrieval in this module happens in `run_all`, never inside a metric
-    function. Which is why the two sides arrive in different shapes — the
-    in-domain side reads `abstained` off the `QuestionResult` rows
-    `evaluate_question` already produced, while the out-of-domain questions
-    have no such rows to read. They never pass through `evaluate_question` at
-    all: an `OutOfDomainQuestion` has no `expected_sources` and no
-    `expected_answer`, so precision/recall/MRR would be meaningless for it and
-    generation would be an LLM call per question per mode for an answer
-    nothing scores. The only thing ever asked of them is `abstained()`.
+    Out-of-domain questions arrive as bare `abstained` flags: with no expected sources or
+    answer, there is nothing else to score.
     """
     false_abstentions = sum(1 for r in in_domain if r.abstained)
     correct_abstentions = sum(out_of_domain_abstained)
@@ -250,13 +188,7 @@ def abstention_metrics(
 
 
 def _best_rerank_scores(retriever: Retriever, questions: list[str], k: int) -> list[float]:
-    """The top candidate's re-rank score for each question — what the floor is compared against.
-
-    The gate keeps a question whenever *any* candidate clears the floor, so
-    the best score alone decides whether that question is answered. Recording
-    it once per question is what lets a whole grid of thresholds be scored
-    from a single retrieval pass.
-    """
+    """Best re-rank score per question: the only score that decides whether the floor refuses it."""
     scores = []
     for question in questions:
         passages = retriever.retrieve(question, top_k=k)
@@ -267,16 +199,10 @@ def _best_rerank_scores(retriever: Retriever, questions: list[str], k: int) -> l
 def sweep_threshold(
     embedder: Embedder, reranker: Reranker, k: int = DEFAULT_K
 ) -> dict[str, object]:
-    """Score every threshold in `THRESHOLD_GRID` against both question sets.
+    """Score every threshold in `THRESHOLD_GRID` on both question sets from one retrieval pass.
 
-    This is where `config.rerank_min_score` comes from. The floor is disabled
-    (`min_rerank_score=0.0`) so the scores it *would* have gated on are
-    visible, then each threshold is evaluated over those recorded scores —
-    one retrieval pass for the whole grid, instead of one per threshold.
-
-    `in_domain_min` and `out_of_domain_max` bracket the useful range directly:
-    any threshold between them separates the two sets perfectly, and if they
-    cross there is no threshold that does.
+    The floor is disabled so every score is visible. If `out_of_domain_max < in_domain_min`,
+    any threshold in between separates the two sets perfectly.
     """
     in_domain = load_golden_set()
     out_of_domain = load_out_of_domain()
@@ -323,13 +249,9 @@ def run_all(
     k: int = DEFAULT_K,
     skip_generation: bool = False,
 ) -> tuple[dict[str, object], list[QuestionResult]]:
-    """Score every strategy x mode. Returns the aggregate report plus every underlying row —
-    the latter is what `write_details_markdown` dumps for manual review.
+    """Score every strategy x mode; returns the aggregate report and every per-question row.
 
-    Both models are passed in rather than constructed here, for the same
-    reason: they're the expensive, downloadable parts, so the caller loads
-    each once and every retriever below shares it — and tests substitute
-    cheap fakes for both.
+    Models are passed in so they load once and tests can substitute fakes.
     """
     questions = load_golden_set()
     out_of_domain = load_out_of_domain()
@@ -389,13 +311,7 @@ def _quote_block(text: str) -> str:
 
 
 def write_details_markdown(results: list[QuestionResult], path: Path, k: int) -> None:
-    """Dump every (question, strategy, mode) row to a human-readable Markdown transcript.
-
-    One section per (strategy, mode) pair, one subsection per question, in
-    golden-set order — meant to be read top to bottom, not queried, so a
-    reviewer can check each generated answer against its expected answer and
-    retrieved sources without re-running anything.
-    """
+    """Dump every (question, strategy, mode) row to a Markdown transcript for manual review."""
     lines = ["# DocQA-Agent — Evaluation Details", ""]
     lines.append(
         f"Full per-question breakdown behind `eval_report.json`, k={k}. "
@@ -449,9 +365,7 @@ def write_details_markdown(results: list[QuestionResult], path: Path, k: int) ->
 def run(k: int = DEFAULT_K, skip_generation: bool = False, sweep: bool = False) -> None:
     """Score every strategy x mode; `--sweep` adds the relevance-floor grid.
 
-    The sweep is opt-in because it is only needed when choosing
-    `config.rerank_min_score`, and it costs a second retrieval pass over both
-    question sets with the floor disabled.
+    The sweep costs a second retrieval pass and is only needed to choose the floor.
     """
     embedder = BGEEmbedder()
     reranker = CrossEncoderReranker()

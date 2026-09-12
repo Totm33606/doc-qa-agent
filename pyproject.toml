@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Retrieval-augmented Q&A over the official FastAPI documentation, with sourced citations and a real retrieval-evaluation harness."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
-authors = [{ name = "Thomas", email = "thomas@example.com" }]
+authors = [{ name = "Thomas" }]
 license = { text = "MIT" }
 
 dependencies = [
@@ -50,16 +50,14 @@ ignore = [
 ]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.12"  # numpy's stubs use 3.12-only syntax, even when running on 3.11
 strict = true
 warn_unused_ignores = true
 disallow_untyped_defs = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-# These libraries ship no py.typed marker / stub package, so mypy can't
-# analyze their types. Scoped narrowly (not a global ignore_missing_imports)
-# to keep --strict meaningful everywhere else.
+# No usable type information; scoped narrowly to keep --strict meaningful elsewhere.
 module = [
     "chromadb.*",
     "sentence_transformers.*",
@@ -73,7 +71,7 @@ testpaths = ["tests"]
 pythonpath = ["src", "."]
 addopts = "-ra --cov=src --cov=eval --cov-report=term-missing"
 markers = [
-    "integration: exercises the real BGE embedding model (network on first run, to download it)",
+    "integration: uses the real embedding and re-ranking models (downloaded on first run)",
 ]
 
 [build-system]

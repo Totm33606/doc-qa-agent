@@ -30,13 +30,10 @@ def test_tokenize_keeps_python_identifiers_whole() -> None:
 
 
 def _filler(n: int) -> list[DocChunk]:
-    """Enough unrelated chunks for Okapi IDF to actually discriminate.
+    """Unrelated filler chunks, so Okapi IDF can discriminate.
 
-    BM25's IDF is `log(N - df + 0.5) - log(df + 0.5)`, which is exactly 0
-    when a term appears in half the corpus — on a two-document fixture every
-    score collapses to 0 regardless of how well a term matches. The real
-    collections hold 347 and 693 chunks, so these fixtures are sized to be
-    representative rather than degenerate.
+    IDF is `log(N - df + 0.5) - log(df + 0.5)`: 0 for a term in half the corpus, so a
+    two-document fixture scores everything 0.
     """
     return [
         _chunk(f"filler{i}", f"unrelated paragraph {i} about serving requests") for i in range(n)

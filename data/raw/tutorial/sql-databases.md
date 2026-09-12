@@ -216,6 +216,8 @@ Then go to the `/docs` UI, you will see that **FastAPI** is using these **models
 
 <div class="screenshot">
 <img src="/img/tutorial/sql-databases/image01.png">
+</div>
+
 ## Update the App with Multiple Models
 
 Now let's **refactor** this app a bit to increase **security** and **versatility**.
@@ -500,6 +502,8 @@ If you go to the `/docs` API UI, you will see that it is now updated, and it won
 
 <div class="screenshot">
 <img src="/img/tutorial/sql-databases/image02.png">
+</div>
+
 ## Recap
 
 You can use [**SQLModel**](https://sqlmodel.tiangolo.com/) to interact with a SQL database and simplify the code with *data models*  and *table models*.

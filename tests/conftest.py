@@ -1,12 +1,6 @@
-"""Shared, hermetic test doubles: a fake embedder, a fake re-ranker and a fake chat model.
+"""Hermetic test doubles for the embedder, the re-ranker and the chat model.
 
-No test in this suite downloads the real `BAAI/bge-small-en-v1.5` model or
-the real `cross-encoder/ms-marco-MiniLM-L-6-v2`, or calls a real LLM (Ollama
-or otherwise) — `FakeEmbedder`, `FakeReranker` and `FakeChatModel` stand in
-for all three, so the whole suite runs offline and in seconds. The one
-exception is `tests/test_integration.py`, explicitly marked `integration`
-and skipped unless `--run-integration` is passed — see that file's
-docstring.
+Only `tests/test_integration.py` (marker `integration`) uses the real models.
 """
 
 from __future__ import annotations
@@ -21,12 +15,7 @@ FAKE_EMBEDDING_DIM = 16
 
 
 class FakeEmbedder:
-    """Deterministic, hash-based embedder — same text always yields the same vector.
-
-    Not semantically meaningful (unlike the real BGE model), but that's
-    fine for tests that only need embeddings to be present and stable
-    across the multiple lookups a Chroma round-trip performs.
-    """
+    """Deterministic, hash-based embedder: stable vectors, no semantics."""
 
     def _vector(self, text: str) -> list[float]:
         digest = hashlib.sha256(text.encode("utf-8")).digest()
@@ -40,14 +29,9 @@ class FakeEmbedder:
 
 
 class FakeReranker:
-    """A `Reranker` (see `retrieval.rerank.Reranker`) with scores dictated per chunk id.
+    """A `Reranker` whose scores are dictated per chunk id (`default` for the rest).
 
-    The real cross-encoder is a judgement call about relevance, which is
-    exactly what a test needs to be able to state outright: `scores` maps a
-    chunk id to the relevance this fake should claim for it, and everything
-    unlisted gets `default`. That makes both the reordering and the
-    relevance floor testable without asserting anything about a real model's
-    opinions.
+    Lets tests state relevance as a premise instead of depending on a real model.
     """
 
     def __init__(self, scores: dict[str, float] | None = None, default: float = 0.5) -> None:

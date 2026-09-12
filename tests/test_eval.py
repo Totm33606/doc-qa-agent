@@ -129,10 +129,8 @@ def test_retrieval_metrics_zero_when_nothing_expected_matches() -> None:
 
 
 class _StubRetriever:
-    """Returns a fixed, hand-chosen ranking regardless of the query — bypasses embedding
-    entirely so precision@k/recall@k/MRR can be checked against a hand-computed value,
-    not just the 0.0/1.0 extremes the tests above cover (which can't catch an off-by-one
-    in the rank/denominator arithmetic). An empty ranking stands in for an abstention."""
+    """Fixed ranking per question, so metrics can be checked against hand-computed values
+    rather than only 0.0/1.0. An empty ranking stands in for an abstention."""
 
     strategy = ChunkingStrategy.FIXED
     mode = RetrievalMode.DENSE

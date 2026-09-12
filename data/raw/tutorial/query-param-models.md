@@ -41,6 +41,8 @@ You can see the query parameters in the docs UI at `/docs`:
 
 <div class="screenshot">
 <img src="/img/tutorial/query-param-models/image01.png">
+</div>
+
 ## Forbid Extra Query Parameters
 
 In some special use cases (probably not very common), you might want to **restrict** the query parameters that you want to receive.

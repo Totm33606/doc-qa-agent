@@ -1,9 +1,7 @@
-"""Regression tests for the pure (non-networked) parts of ingestion.fetch's preprocessing.
+"""Tests for the offline preprocessing in ingestion.fetch.
 
-Two of these guard bugs found while building the real corpus: `\\s*$` in
-both `_HEADER_ID` and `_ADMONITION` originally ate the blank line that
-followed a header or a closing `///`, silently merging two paragraphs into
-one — see the git history / module docstring in ingestion/fetch.py.
+The blank-line tests guard a fixed bug: a trailing `\\s*$` in `_HEADER_ID` and
+`_ADMONITION` ate the blank line after a header or closing `///`, merging paragraphs.
 """
 
 from __future__ import annotations
@@ -56,6 +54,13 @@ def test_strip_termy_divs_removes_wrapper_but_keeps_code_block() -> None:
     assert "<div" not in result
     assert "</div>" not in result
     assert "```console\n$ uv add sqlmodel\n```" in result
+
+
+def test_strip_termy_divs_leaves_other_divs_intact() -> None:
+    """Regression: an unanchored `</div>` pattern also stripped the closing tag of other divs."""
+    screenshot = '<div class="screenshot">\n<img src="/img/x.png">\n</div>\n'
+    text = '<div class="termy">\n\n```console\n$ fastapi dev\n```\n\n</div>\n\n' + screenshot
+    assert _strip_termy_divs(text) == "```console\n$ fastapi dev\n```\n\n" + screenshot
 
 
 def test_snippet_url_anchors_from_docs_src_regardless_of_leading_dots() -> None:

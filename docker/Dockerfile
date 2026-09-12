@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # --- Base: uv-managed Python, shared by all stages ---------------------------
 FROM python:3.11-slim AS base
-COPY --from=ghcr.io/astral-sh/uv:0.5 /uv /uvx /usr/local/bin/
+COPY --from=ghcr.io/astral-sh/uv:0.12 /uv /uvx /usr/local/bin/
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     PYTHONUNBUFFERED=1 \
@@ -10,22 +10,17 @@ WORKDIR /app
 
 # --- Dependencies layer (cached independently of source changes) ------------
 FROM base AS deps
-COPY pyproject.toml README.md ./
+# Exact versions from uv.lock; the project itself is imported via PYTHONPATH below.
+COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -e .
+    uv export --frozen --no-dev --no-emit-project -o requirements.txt \
+    && uv pip install --system -r requirements.txt
 
-# --- Build the vector store at image-build time, not at container startup ---
-# Bakes in both Chroma collections (~16MB) *and* both model checkpoints so the
-# container is self-contained at runtime — no download, no re-embedding, no
-# network dependency beyond reaching whichever LLM `/ask` is configured to call.
-#
-# HF_HOME is pinned to a path under /app (rather than the default ~/.cache) for
-# a specific reason: this stage runs as root, the runtime stage runs as `docqa`,
-# and a cache under /root would be unreadable there — so every model would be
-# re-downloaded on the first request, exactly what baking them in is meant to
-# prevent. `ingestion.build` warms the embedder as a side effect of using it;
-# the re-ranker is only touched by `hybrid_rerank` requests, so it's fetched
-# explicitly here instead of on a user's first one.
+# --- Vector store and both models, baked in at image-build time --------------
+# At runtime the container only needs network to reach the LLM. `ingestion.build`
+# downloads the embedder; the re-ranker is fetched explicitly. HF_HOME sits under
+# /app because a cache under /root is unreadable by the non-root runtime user,
+# which would re-download both models at every container start.
 FROM deps AS store
 COPY src/ ./src/
 COPY data/raw/ ./data/raw/
@@ -37,9 +32,7 @@ RUN python -m ingestion.build \
 # --- Runtime image ------------------------------------------------------------
 FROM store AS runtime
 
-# Non-root user: standard hardening for a production-facing image. The store
-# and the model cache were both built as root above; chown so the runtime user
-# can actually open them.
+# Non-root user; the store and model cache were built as root, so hand them over.
 RUN useradd --create-home --uid 1000 docqa \
     && chown -R docqa:docqa /app/data /app/.cache
 USER docqa

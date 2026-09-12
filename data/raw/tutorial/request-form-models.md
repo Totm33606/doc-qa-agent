@@ -47,6 +47,8 @@ You can verify it in the docs UI at `/docs`:
 
 <div class="screenshot">
 <img src="/img/tutorial/request-form-models/image01.png">
+</div>
+
 ## Forbid Extra Form Fields
 
 In some special use cases (probably not very common), you might want to **restrict** the form fields to only those declared in the Pydantic model. And **forbid** any **extra** fields.

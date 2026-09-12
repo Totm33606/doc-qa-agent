@@ -1,16 +1,12 @@
-"""Shared data models — the vocabulary used across ingestion, retrieval, generation and the API.
-
-Kept in one module (mirroring `common.schemas` in the finrisk-agent sibling
-project) so every stage of the pipeline agrees on the exact shape of a
-"chunk", a "passage" and a "citation" instead of each script inventing its
-own dict layout.
-"""
+"""Shared data models used by ingestion, retrieval, generation, the API and the eval harness."""
 
 from __future__ import annotations
 
 from enum import Enum
 
 from pydantic import BaseModel, Field
+
+from common.config import config
 
 
 class ChunkingStrategy(str, Enum):
@@ -45,13 +41,9 @@ class DocChunk(BaseModel):
 
 
 class RetrievedPassage(BaseModel):
-    """A chunk returned by the retriever for a given query, with its relevance score(s).
+    """A chunk returned by the retriever, with its first-stage score and optional re-rank score.
 
-    Two scores, because they come from different stages and mean different
-    things. `score` is the first-stage score, and what it measures depends on
-    the mode. `rerank_score` is the cross-encoder's, and is the only one that
-    is comparable across questions — which is why it, and not `score`, is what
-    the relevance floor in `retrieval/retriever.py` is applied to.
+    Only `rerank_score` is comparable across questions, so the relevance floor applies to it.
     """
 
     chunk_id: str
@@ -64,7 +56,7 @@ class RetrievedPassage(BaseModel):
     )
     rerank_score: float | None = Field(
         None,
-        description="Cross-encoder relevance score, squashed to [0, 1] by a sigmoid so it is comparable across questions — confident, not calibrated. None in modes that don't re-rank. When set, this is what the passages are ordered by",
+        description="Cross-encoder relevance score in [0, 1] (sigmoid of the logit); passages are ordered by it when set. Null in modes that don't re-rank",
     )
 
 
@@ -80,7 +72,7 @@ class Citation(BaseModel):
 
 class AskRequest(BaseModel):
     question: str
-    top_k: int = Field(5, ge=1, le=20)
+    top_k: int = Field(config.default_top_k, ge=1, le=20)
     strategy: ChunkingStrategy = ChunkingStrategy.MARKDOWN
     mode: RetrievalMode = RetrievalMode.HYBRID
 
@@ -115,10 +107,7 @@ class GoldenQuestion(BaseModel):
 class OutOfDomainQuestion(BaseModel):
     """One entry in eval/out_of_domain.yaml — a question the corpus cannot answer.
 
-    The golden set measures whether the right passages come back. This set
-    measures the opposite obligation: recognizing that *no* passage is right,
-    so the agent refuses instead of answering from whatever ranked highest.
-    There is no `expected_answer` because the only correct answer is a refusal.
+    There is no `expected_answer`: the only correct response is a refusal.
     """
 
     id: str
@@ -144,7 +133,7 @@ class GenerationMetrics(BaseModel):
     mode: RetrievalMode
     mean_groundedness: float = Field(
         ...,
-        description="Mean groundedness over the *answered* questions only — an abstention has no citations and would score 0.0, which would make a correct refusal indistinguishable from a hallucination",
+        description="Mean groundedness over answered questions only; abstentions are excluded (a refusal has no citations and would score 0.0)",
     )
     n_questions: int = Field(..., description="How many questions the mean above is over")
     abstention_rate: float = Field(
@@ -156,17 +145,14 @@ class GenerationMetrics(BaseModel):
 class AbstentionMetrics(BaseModel):
     """How well one (strategy, mode) tells answerable questions from unanswerable ones.
 
-    Two error rates, deliberately reported side by side rather than folded
-    into one number: they trade off against each other as the relevance floor
-    moves, and which trade is acceptable is a judgement call the report should
-    show rather than make.
+    The two rates trade off as the relevance floor moves, so they are reported separately.
     """
 
     strategy: ChunkingStrategy
     mode: RetrievalMode
     threshold: float | None = Field(
         ...,
-        description="The relevance floor these rates were measured at, or null for a mode that has no floor and so can never abstain",
+        description="Relevance floor these rates were measured at; null for modes that cannot abstain",
     )
     false_abstention_rate: float = Field(
         ..., description="Fraction of in-domain golden questions wrongly refused. Lower is better"
@@ -180,14 +166,7 @@ class AbstentionMetrics(BaseModel):
 
 
 class QuestionResult(BaseModel):
-    """The full detail behind one (question, strategy, mode) data point in the aggregate metrics.
-
-    `RetrievalMetrics`/`GenerationMetrics` are averages over exactly these
-    rows — one `QuestionResult` per golden question per (strategy, mode)
-    pair is what `eval/run_eval.py::write_details_markdown` dumps for manual
-    review, so a suspicious aggregate number can always be traced back to
-    the specific question(s) behind it instead of taken on faith.
-    """
+    """One (question, strategy, mode) row — averaged into the metrics, dumped to eval_details.md."""
 
     strategy: ChunkingStrategy
     mode: RetrievalMode

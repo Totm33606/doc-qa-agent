@@ -10,6 +10,7 @@ __pycache__/
 htmlcov/
 data/chroma/
 eval/eval_report.json
+eval/eval_details.md
 tests/
 .env
 .env.local

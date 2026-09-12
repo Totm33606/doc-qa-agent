@@ -147,12 +147,15 @@ def test_ask_rejects_invalid_top_k(hermetic_app: object) -> None:
     assert response.status_code == 422
 
 
+@pytest.mark.parametrize("error", [ValueError, RuntimeError])
 def test_ask_returns_502_on_unexpected_generation_failure(
-    hermetic_app: object, monkeypatch: pytest.MonkeyPatch
+    hermetic_app: object, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
 ) -> None:
+    """Only a not-started runtime is a 503 — a RuntimeError raised downstream is a 502."""
+
     class _RaisingChatModel:
         def invoke(self, messages: object) -> object:
-            raise ValueError("simulated LLM failure")
+            raise error("simulated LLM failure")
 
     monkeypatch.setattr("generation.generate.build_llm", lambda: _RaisingChatModel())
 

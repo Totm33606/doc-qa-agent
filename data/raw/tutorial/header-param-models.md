@@ -42,6 +42,8 @@ You can see the required headers in the docs UI at `/docs`:
 
 <div class="screenshot">
 <img src="/img/tutorial/header-param-models/image01.png">
+</div>
+
 ## Forbid Extra Headers
 
 In some special use cases (probably not very common), you might want to **restrict** the headers that you want to receive.

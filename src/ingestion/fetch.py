@@ -1,19 +1,9 @@
-"""Fetch a pinned, curated snapshot of the official FastAPI documentation.
+"""Fetch a curated snapshot of the FastAPI docs' Markdown source at a pinned tag.
 
-Downloads Markdown source files directly from the `fastapi/fastapi` GitHub
-repository (not the rendered HTML site) at a pinned release tag
-(`config.fastapi_repo_ref`), so the corpus is byte-for-byte reproducible
-and doesn't depend on the live site being up. Four cleanup passes turn
-that raw source into plain Markdown before it's written to `data/raw/` —
-see each function's own docstring/comment for what it does and why:
-`_inline_snippets` (resolves FastAPI's `{* path *}` code-snippet macro),
-`_flatten_admonitions` (`///tip ... ///` blocks), `_strip_header_ids`
-(`{ #anchor }` suffixes) and `_strip_termy_divs` (the animated-terminal
-HTML wrapper).
-
-This script only runs when refreshing the corpus — it is not part of the
-test suite or the API's request path, so its network dependency never
-affects hermeticity elsewhere in the project.
+Pages come from the `fastapi/fastapi` repository at `config.fastapi_repo_ref` and are
+cleaned before being written to `data/raw/`: `{* path *}` snippet macros are inlined,
+`/// tip` admonitions flattened, `{ #anchor }` header IDs and termy `<div>` wrappers
+stripped. Only needed to refresh the corpus.
 
 Run: `uv run python -m ingestion.fetch`
 """
@@ -37,14 +27,8 @@ app = typer.Typer(add_completion=False)
 
 RAW_BASE = "https://raw.githubusercontent.com/fastapi/fastapi"
 
-# Curated scope: the core tutorial (the guided, linear "how FastAPI works"
-# path) plus the advanced pages that document behavior a developer looks up
-# often enough to be worth a golden question. Deliberately excludes
-# `reference/` (auto-generated API-signature stubs, near-zero prose),
-# `deployment/`, `about/`, `alternatives.md`, `benchmarks.md`,
-# `history-design-future.md`, `contributing.md`, `translations.md` and
-# similar meta/marketing pages — see README's "Corpus" section for the
-# scoping rationale.
+# The core tutorial plus commonly looked-up advanced pages. `reference/`, `deployment/`,
+# `about/` and meta pages are excluded (see the README's "Corpus" section).
 TUTORIAL_PAGES = [
     "tutorial/first-steps.md",
     "tutorial/path-params.md",
@@ -129,20 +113,18 @@ _ADMONITION = re.compile(
     re.MULTILINE,
 )
 _HEADER_ID = re.compile(r"^(#{1,6}[ \t]+.+?)[ \t]*\{[ \t]*#[\w-]+[ \t]*\}[ \t]*$", re.MULTILINE)
-# The mkdocs-material "termy" animated-terminal widget: a raw HTML wrapper
-# around an otherwise-plain console code block. Only the wrapper tags are
-# noise for a Markdown corpus — the fenced block inside is kept as-is.
-_TERMY_DIV = re.compile(r"^<div class=\"termy\">\n\n?|\n?</div>\n", re.MULTILINE)
+# The "termy" animated-terminal HTML wrapper; the code block inside is kept. Matched as a
+# whole block so the `</div>` of other divs (e.g. screenshots) is left alone.
+_TERMY_DIV = re.compile(
+    r"^<div class=\"termy\">\n\n?(?P<body>.*?)\n?</div>\n", re.MULTILINE | re.DOTALL
+)
 
 
 def _snippet_url(macro_path: str, ref: str) -> str | None:
     """Resolve a `{* ../../docs_src/foo/bar.py *}` macro path to a raw-content URL.
 
-    FastAPI's docs macros always point into the repo-root `docs_src/` tree
-    regardless of how deeply nested the referencing page is (verified
-    against pages at both `tutorial/*.md` and `tutorial/dependencies/*.md`
-    depths) — so the reliable rule is "resolve from the `docs_src/` anchor
-    onward", not "resolve the literal `../../` relative to the page".
+    Macros always target the repo-root `docs_src/`, whatever the page depth, so the path
+    is anchored at `docs_src/` rather than resolved relative to the page.
     """
     if "docs_src/" not in macro_path:
         return None
@@ -153,11 +135,8 @@ def _snippet_url(macro_path: str, ref: str) -> str | None:
 def _inline_snippets(markdown: str, ref: str, client: httpx.Client) -> str:
     """Resolve every `{* path [ln[a:b]] [hl[...]] [title[...]] *}` macro to a code block.
 
-    Some pages reference the same growing source file many times, each call
-    showing only the lines built up so far (a `ln[a:b]` selector, 1-indexed
-    inclusive) — honoring that selector, instead of always inlining the
-    whole file, is what keeps e.g. `sql-databases.md` a normal-sized page
-    instead of ~20 near-duplicate copies of the same file.
+    The `ln[a:b]` selector (1-indexed, inclusive) is honored: pages like `sql-databases.md`
+    show the same file many times, a few lines at a time.
     """
 
     def _replace(match: re.Match[str]) -> str:
@@ -196,7 +175,7 @@ def _strip_header_ids(markdown: str) -> str:
 
 
 def _strip_termy_divs(markdown: str) -> str:
-    return _TERMY_DIV.sub("", markdown)
+    return _TERMY_DIV.sub(r"\g<body>", markdown)
 
 
 @app.command()

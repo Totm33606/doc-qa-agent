@@ -1,9 +1,7 @@
-"""The FastAPI serving layer: `POST /ask` wires retrieval and generation together per request.
+"""FastAPI serving layer: `POST /ask` runs retrieval, then generation.
 
-Endpoints are plain `def`, not `async def` — embedding a query and calling
-the LLM are both blocking calls, and FastAPI runs sync path functions in a
-worker thread automatically, so this avoids stalling the event loop
-without needing to wrap every call in `run_in_threadpool` by hand.
+Endpoints are plain `def`: the model and LLM calls block, and FastAPI runs sync
+endpoints in a worker thread.
 
 Run: `uv run uvicorn api.app:app --reload --port 8000`
 """
@@ -26,16 +24,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 
-class DocQARuntime:
-    """Owns the models and one retriever per (chunking strategy, retrieval mode), built at startup.
+class RuntimeNotStartedError(RuntimeError):
+    """`/ask` was called before the lifespan loaded the models."""
 
-    One retriever per combination, so a request never pays to construct one —
-    and the expensive parts are per-mode: only the hybrid ones build a BM25
-    index, only the re-ranking ones use the cross-encoder. The embedder and
-    the re-ranker are each loaded **once** and shared by every retriever that
-    needs them, rather than letting each construct its own copy of the same
-    model.
-    """
+
+class DocQARuntime:
+    """Loads both models once at startup and builds one retriever per (strategy, mode)."""
 
     def __init__(self) -> None:
         self.embedder: Embedder | None = None
@@ -58,7 +52,7 @@ class DocQARuntime:
 
     def ask(self, request: AskRequest) -> AskResponse:
         if self.embedder is None:
-            raise RuntimeError("Runtime not started — call `runtime.start()` first.")
+            raise RuntimeNotStartedError("Runtime not started — call `runtime.start()` first.")
         retriever = self.retrievers[(request.strategy, request.mode)]
         passages = retriever.retrieve(request.question, top_k=request.top_k)
         return generate_answer(request.question, passages)
@@ -86,7 +80,7 @@ app = FastAPI(
 def ask(payload: AskRequest) -> AskResponse:
     try:
         return runtime.ask(payload)
-    except RuntimeError as exc:
+    except RuntimeNotStartedError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Ask failed for question=%r", payload.question)

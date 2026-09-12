@@ -1,33 +1,12 @@
-"""Generate a grounded answer from retrieved passages, then score how grounded it actually is.
+"""Generate an answer from retrieved passages, then score how grounded it is.
 
-`compute_groundedness` splits the answer at each citation marker and
-checks whether the claim right before each marker cites valid, in-range
-passages. A citation only counts if it trails the claim it supports — one
-with nothing real before it (leading a claim instead of following one)
-counts for nothing, matching what the prompt asks for. Three format
-liberties are tolerated, all found by reading real generated output: bare
-`[N]` as well as `[source: N]` (the model sometimes echoes the `[N]
-file#section` notation shown in its own context instead of the requested
-form), and one marker citing several passages at once, `[source: 2,5]`
-(a segment behind one of these only counts as grounded if *every* index
-in it is valid — one real citation bundled with one fabricated one is
-still citing a passage that was never shown).
+Accepted citation markers: `[source: N]` (what the prompt asks for), bare `[N]`, and
+multi-index `[source: 2,5]`, grounded only if every index is valid. A marker only
+counts when it trails claim text. This is a syntactic proxy: it catches citations to
+passages never shown, not claims the cited passage doesn't support.
 
-This is a syntactic proxy for "is this traceable to a source", not a
-semantic entailment check — it can't verify the cited passage actually
-*says* what the claim asserts. See the README's Evaluation section for
-what this heuristic does and doesn't catch, and for the design history
-(why leading citations, and sentence-based splitting, were tried and
-dropped).
-
-**Abstention.** `generate_answer` never calls the LLM with an empty passage
-list. An empty list is not an error here, it's a decision made upstream:
-`retrieval.retriever`'s relevance floor drops candidates a cross-encoder
-judged irrelevant, so retrieving nothing means nothing in the corpus was
-relevant enough to answer from. The response is then a fixed refusal with
-`abstained=True`, which makes the prompt's "say so if the passages don't
-contain enough information" rule enforced rather than merely requested —
-a model that ignores it never gets the chance, because it is never asked.
+With no passages (nothing cleared the relevance floor), `generate_answer` returns a
+fixed refusal without calling the LLM.
 """
 
 from __future__ import annotations
@@ -46,7 +25,7 @@ _HAS_WORD_RE = re.compile(r"\w")
 
 
 def _indices(match: re.Match[str]) -> list[int]:
-    """Parse a citation marker's digits into indices — usually one, e.g. `2, 5` for `[source: 2,5]`."""
+    """`[source: 2,5]` -> [2, 5]."""
     return [int(n) for n in match.group(1).split(",")]
 
 
@@ -63,14 +42,9 @@ class ChatModel(Protocol):
 
 
 def extract_citations(answer: str, passages: list[RetrievedPassage]) -> list[Citation]:
-    """Pull every citation marker out of `answer` and resolve each index to a real passage.
+    """Resolve every citation index in `answer` to a passage, one `Citation` per index.
 
-    A single marker citing several passages at once (`[source: 2,5]`)
-    yields one `Citation` per index. `matched_passage` is False when the
-    index is out of range (0, too large, or otherwise not one of the
-    passages actually shown to the model) — a citation to a passage
-    number that was never shown is exactly the hallucination case this is
-    meant to catch.
+    `matched_passage` is False for an index outside the passages shown to the model.
     """
     citations = []
     for match in _CITATION_RE.finditer(answer):
@@ -88,14 +62,11 @@ def extract_citations(answer: str, passages: list[RetrievedPassage]) -> list[Cit
 
 
 def compute_groundedness(answer: str, passages: list[RetrievedPassage]) -> float:
-    """Fraction of the answer's claim segments (text between citation markers) that are grounded.
+    """Fraction of claim segments that are grounded.
 
-    Each citation marker closes out the claim segment before it; leftover
-    text after the last marker is one more, uncited, segment. A segment
-    only counts as a real claim if it has at least one word character
-    (`_HAS_WORD_RE`) — otherwise a citation styled "claim [3]." (period
-    *after* the bracket) would leave a lone "." that isn't blank but also
-    isn't a claim, and get counted as an extra uncited segment.
+    Each marker closes the segment before it; text after the last marker is one more,
+    uncited, segment. Segments without a word character (the "." in "claim [3].") are
+    not claims.
     """
     text = answer.strip()
     if not text:
@@ -123,14 +94,7 @@ def compute_groundedness(answer: str, passages: list[RetrievedPassage]) -> float
 def generate_answer(
     question: str, passages: list[RetrievedPassage], llm: ChatModel | None = None
 ) -> AskResponse:
-    """Answer from the retrieved passages, or abstain when there are none.
-
-    Two paths, and the short one is not an error case. No passages means
-    retrieval found nothing relevant enough to show (see the relevance floor
-    in `retrieval.retriever`), so the honest response is a refusal — returned
-    as a fixed string, with no LLM call, because there is nothing for a model
-    to be grounded in.
-    """
+    """Answer from the passages, or return a fixed refusal without an LLM call if there are none."""
     if not passages:
         return AskResponse(
             question=question,

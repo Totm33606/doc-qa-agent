@@ -1,27 +1,13 @@
-"""Two chunking strategies, compared head-to-head by eval/run_eval.py.
+"""Two chunking strategies sharing one token budget, sized in real tokens with `tiktoken`.
 
-**Fixed-size** (`chunk_fixed`): a `RecursiveCharacterTextSplitter` over a
-paragraph -> line -> sentence -> word -> char separator hierarchy, sized in
-real tokens (via `tiktoken`, not characters) so "~500 tokens" means what it
-says regardless of how dense a page's prose is. This is the MVP default:
-simple, fast, and blind to document structure.
+- `chunk_fixed`: `RecursiveCharacterTextSplitter` over paragraph -> line -> sentence ->
+  word -> char separators, blind to document structure.
+- `chunk_markdown_aware`: split by header first, so each chunk carries its breadcrumb
+  (e.g. "Path Parameters > Order matters"); sections still over budget are then split
+  by the same recursive splitter.
 
-**Markdown-aware** (`chunk_markdown_aware`): first split by header, so a
-chunk boundary never falls in the middle of a section — each chunk carries
-the header breadcrumb it came from (e.g. "Path Parameters > Order
-matters") as citable metadata. A section that's still over the token
-budget is then run back through the same recursive splitter, so both
-strategies share one token budget and one splitting algorithm for the "too
-big" case — the only difference is *where the first cut is made*.
-
-The header split is a small hand-rolled, fence-aware line scanner
-(`_split_by_headers`), not LangChain's own `MarkdownHeaderTextSplitter`:
-that splitter round-trips content through the `markdown` HTML library,
-which collapses code-block indentation (`    return {"item_id": item_id}`
-becomes `return {"item_id": item_id}`) — silently corrupting every Python
-example in a docs corpus that is mostly Python examples. The hand-rolled
-version tracks fenced-code-block state line by line and never touches a
-line's content, only decides where the cut points are.
+The header split is hand-rolled because LangChain's `MarkdownHeaderTextSplitter` strips
+every line, code blocks included, which destroys Python indentation.
 """
 
 from __future__ import annotations
@@ -37,9 +23,7 @@ from common.schemas import ChunkingStrategy, DocChunk
 
 _encoding = tiktoken.get_encoding(config.token_encoding)
 
-# Paragraph, then line, then sentence, then word, then character — the same
-# separator hierarchy LangChain's own default uses, tried in order until a
-# piece fits inside the token budget.
+# Paragraph, line, sentence, word, character: tried in order until a piece fits the budget.
 _SEPARATORS = ["\n\n", "\n", ". ", " ", ""]
 
 _MAX_HEADER_LEVEL = 4
@@ -87,11 +71,8 @@ def chunk_fixed(text: str, source_file: str) -> list[DocChunk]:
 def _split_by_headers(text: str) -> list[tuple[str, str]]:
     """Split `text` into (header breadcrumb, section content) pairs.
 
-    Scans line by line, tracking fenced-code-block state so a `#` inside a
-    Python comment or an f-string never gets mistaken for a Markdown
-    header, and never rewrites a line's content — only decides where
-    section boundaries fall. Deeper headers reset when a shallower one
-    appears (an `##` under an `#` gets nested; a new `#` clears both).
+    Fence-aware, so a `#` comment in a code block isn't a header, and never rewrites a
+    line. A header clears the breadcrumb levels below it.
     """
     breadcrumb_stack: list[str | None] = [None] * _MAX_HEADER_LEVEL
     sections: list[tuple[str, str]] = []
