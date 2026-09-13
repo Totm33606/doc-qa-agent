@@ -400,7 +400,7 @@ Disabling the floor (`min_rerank_score=0.0`) separates the two causes:
   prose full of code and identifiers — a domain shift a 22M-parameter model absorbs
   poorly. A FastAPI-tuned re-ranker might well reverse the result.
 - **The floor costs precision, not refusals.** No golden question is refused
-  (false abstention 0.0000 everywhere); instead, relevant passages scoring below 0.2
+  (false abstention 0.0000 on both collections); instead, relevant passages scoring below 0.2
   are dropped from answers that still get produced, and precision@5 always divides
   by 5. On the fixed collection it also cost recall (0.9342 → 0.9211): on one
   two-source question, the only chunk from one of its expected files scored below the
@@ -423,12 +423,11 @@ remain the more informative columns for this mostly single-source golden set.
 
 | Configuration | Relevance floor | False abstention (38 in-domain) | Correct abstention (10 out-of-domain) |
 |---|---|---|---|
-| `dense` / `hybrid`, both strategies | none | 0.0000 | 0.0000 |
 | fixed / hybrid_rerank | 0.2 | **0.0000** | **0.6000** |
 | markdown / hybrid_rerank | 0.2 | **0.0000** | **0.6000** |
 
-`dense` and `hybrid` report `threshold: null`: their 0.0000 means they *cannot*
-abstain, not that they chose to answer.
+Only `hybrid_rerank` has a relevance floor, so abstention is measured for it alone: the
+report has no abstention entry for `dense` and `hybrid`, which answer every question.
 
 **Choosing the threshold.** `--sweep` records each question's best re-rank score
 (the only one the floor's decision depends on) and evaluates the whole grid from a
@@ -488,12 +487,12 @@ provides.
   expected file.
 - **groundedness** (`generate.py::compute_groundedness`): fraction of claim segments
   followed by a valid citation (see [Generation & citations](#generation--citations)).
-- **false / correct abstention rate** (`run_eval.py::abstention_metrics`): a question
-  counts as refused when retrieval returns nothing; retrieval-only, so available with
-  `--skip-generation`.
+- **false / correct abstention rate** (`run_eval.py::abstention_metrics`), for
+  `hybrid_rerank` only: a question counts as refused when retrieval returns nothing;
+  retrieval-only, so available with `--skip-generation`.
 - **Abstentions are excluded from mean groundedness**: a refusal has no citations and
-  would score 0.0, making a correct refusal look like a hallucination.
-  `abstention_rate` is reported alongside.
+  would score 0.0, making a correct refusal look like a hallucination. `n_questions`
+  gives how many answers the mean covers.
 
 ```bash
 uv run python -m eval.run_eval                    # retrieval + generation

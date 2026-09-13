@@ -266,7 +266,6 @@ def test_generation_metrics_excludes_abstentions_from_the_mean() -> None:
 
     assert metrics.mean_groundedness == 1.0  # not 2/3
     assert metrics.n_questions == 2  # the denominator says so
-    assert metrics.abstention_rate == pytest.approx(1 / 3)
 
 
 def test_generation_metrics_when_everything_was_refused() -> None:
@@ -279,7 +278,6 @@ def test_generation_metrics_when_everything_was_refused() -> None:
 
     assert metrics.mean_groundedness == 0.0
     assert metrics.n_questions == 0
-    assert metrics.abstention_rate == 1.0
 
 
 def test_evaluate_question_marks_an_empty_retrieval_as_an_abstention() -> None:
@@ -326,11 +324,10 @@ def test_abstention_metrics_reduces_both_error_rates() -> None:
 
 
 def test_abstention_metrics_with_no_questions_does_not_divide_by_zero() -> None:
-    metrics = abstention_metrics(ChunkingStrategy.FIXED, RetrievalMode.DENSE, None, [], [])
+    metrics = abstention_metrics(ChunkingStrategy.FIXED, RetrievalMode.HYBRID_RERANK, 0.2, [], [])
 
     assert metrics.false_abstention_rate == 0.0
     assert metrics.correct_abstention_rate == 0.0
-    assert metrics.threshold is None
 
 
 def test_abstained_reads_an_empty_retrieval_as_a_refusal() -> None:
@@ -420,7 +417,7 @@ _FAKE_OUT_OF_DOMAIN = [
 
 
 def _expected_retrieval_entry(strategy: str, mode: str) -> dict[str, object]:
-    return {
+    entry: dict[str, object] = {
         "retrieval": {
             "strategy": strategy,
             "mode": mode,
@@ -430,22 +427,20 @@ def _expected_retrieval_entry(strategy: str, mode: str) -> dict[str, object]:
             "mrr": 1.0,
             "n_questions": 1,
         },
-        "abstention": {
+    }
+    # Only the re-ranking mode has a floor, so only it gets an abstention entry. The seeded
+    # store answers everything and the fake re-ranker scores it above the floor: no refusals.
+    if mode == "hybrid_rerank":
+        entry["abstention"] = {
             "strategy": strategy,
             "mode": mode,
-            # Only the re-ranking mode has a floor at all; the other two report
-            # null, which is what makes their zero rates readable as "cannot
-            # abstain" rather than "did not happen to".
-            "threshold": config.rerank_min_score if mode == "hybrid_rerank" else None,
-            # The seeded store answers everything (one chunk, always retrieved)
-            # and the fake re-ranker scores it well above the floor, so nothing
-            # is refused either rightly or wrongly.
+            "threshold": config.rerank_min_score,
             "false_abstention_rate": 0.0,
             "correct_abstention_rate": 0.0,
             "n_in_domain": 1,
             "n_out_of_domain": 1,
-        },
-    }
+        }
+    return entry
 
 
 def test_run_all_builds_a_report_entry_per_strategy_and_mode(
@@ -475,6 +470,26 @@ def test_run_all_builds_a_report_entry_per_strategy_and_mode(
     assert {(r.strategy, r.mode) for r in results} == {
         (s, m) for s in ChunkingStrategy for m in RetrievalMode
     }
+
+
+def test_run_all_only_retrieves_out_of_domain_questions_for_modes_that_can_abstain(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(config, "chroma_dir", tmp_path / "chroma")
+    _seed_both_collections(config.chroma_dir)
+    monkeypatch.setattr(run_eval_module, "load_golden_set", lambda: _FAKE_QUESTIONS)
+    monkeypatch.setattr(run_eval_module, "load_out_of_domain", lambda: _FAKE_OUT_OF_DOMAIN)
+    modes_checked: list[RetrievalMode] = []
+
+    def _recording_abstained(retriever: Retriever, question: str, k: int = 5) -> bool:
+        modes_checked.append(retriever.mode)
+        return abstained(retriever, question, k)
+
+    monkeypatch.setattr(run_eval_module, "abstained", _recording_abstained)
+
+    run_all(embedder, reranker, k=1, skip_generation=True)
+
+    assert modes_checked == [RetrievalMode.HYBRID_RERANK] * len(ChunkingStrategy)
 
 
 def test_run_all_includes_generation_unless_skipped(

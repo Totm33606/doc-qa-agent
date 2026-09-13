@@ -135,25 +135,20 @@ class GenerationMetrics(BaseModel):
         ...,
         description="Mean groundedness over answered questions only; abstentions are excluded (a refusal has no citations and would score 0.0)",
     )
-    n_questions: int = Field(..., description="How many questions the mean above is over")
-    abstention_rate: float = Field(
-        0.0,
-        description="Fraction of golden questions the retriever refused, i.e. the rows excluded from mean_groundedness",
+    n_questions: int = Field(
+        ..., description="How many answered questions the mean is over (abstentions excluded)"
     )
 
 
 class AbstentionMetrics(BaseModel):
-    """How well one (strategy, mode) tells answerable questions from unanswerable ones.
+    """How well a mode with a relevance floor tells answerable questions from unanswerable ones.
 
-    The two rates trade off as the relevance floor moves, so they are reported separately.
+    Only reported for modes that can abstain. The two rates trade off as the floor moves.
     """
 
     strategy: ChunkingStrategy
     mode: RetrievalMode
-    threshold: float | None = Field(
-        ...,
-        description="Relevance floor these rates were measured at; null for modes that cannot abstain",
-    )
+    threshold: float = Field(..., description="Relevance floor these rates were measured at")
     false_abstention_rate: float = Field(
         ..., description="Fraction of in-domain golden questions wrongly refused. Lower is better"
     )

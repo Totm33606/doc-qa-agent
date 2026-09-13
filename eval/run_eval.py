@@ -3,8 +3,9 @@
 - Retrieval, at file level: precision@k, recall@k, MRR (1/rank of the first passage from
   an expected file).
 - Generation: mean groundedness over answered questions (see `generation.generate`).
-- Abstention: false rate on `golden_set.yaml`, correct rate on `out_of_domain.yaml`.
-  `--sweep` adds the threshold grid `config.rerank_min_score` is chosen from.
+- Abstention, only for modes with a relevance floor (`hybrid_rerank`): false rate on
+  `golden_set.yaml`, correct rate on `out_of_domain.yaml`. `--sweep` adds the threshold
+  grid `config.rerank_min_score` is chosen from.
 
 `evaluate_question` produces one row per (question, strategy, mode); both the aggregates
 in `eval_report.json` and the transcript in `eval_details.md` are built from those rows.
@@ -136,7 +137,7 @@ def retrieval_metrics(
 def generation_metrics(
     results: list[QuestionResult], strategy: ChunkingStrategy, mode: RetrievalMode
 ) -> GenerationMetrics:
-    """Mean groundedness over answered questions, plus the abstention rate.
+    """Mean groundedness over the answered questions (`n_questions` of them).
 
     Abstentions are excluded: a refusal has no citations and would score 0.0, making a
     correct refusal look like a hallucination.
@@ -152,7 +153,6 @@ def generation_metrics(
         mode=mode,
         mean_groundedness=sum(scores) / n if n else 0.0,
         n_questions=n,
-        abstention_rate=sum(r.abstained for r in results) / len(results) if results else 0.0,
     )
 
 
@@ -164,7 +164,7 @@ def abstained(retriever: Retriever, question: str, k: int = DEFAULT_K) -> bool:
 def abstention_metrics(
     strategy: ChunkingStrategy,
     mode: RetrievalMode,
-    threshold: float | None,
+    threshold: float,
     in_domain: list[QuestionResult],
     out_of_domain_abstained: list[bool],
 ) -> AbstentionMetrics:
@@ -268,24 +268,9 @@ def run_all(
             all_results.extend(results)
 
             r_metrics = retrieval_metrics(results, strategy, mode, k)
-            a_metrics = abstention_metrics(
-                strategy,
-                mode,
-                retriever.min_rerank_score,
-                results,
-                [abstained(retriever, q.question, k) for q in out_of_domain],
-            )
-            entry: dict[str, object] = {
-                "retrieval": r_metrics.model_dump(),
-                "abstention": a_metrics.model_dump(),
-            }
-            if not skip_generation:
-                entry["generation"] = generation_metrics(results, strategy, mode).model_dump()
-            strategies.setdefault(strategy.value, {})[mode.value] = entry
-
+            entry: dict[str, object] = {"retrieval": r_metrics.model_dump()}
             logger.info(
-                "strategy=%s mode=%s precision@%d=%.3f recall@%d=%.3f mrr=%.3f "
-                "false-abstention=%.3f correct-abstention=%.3f",
+                "strategy=%s mode=%s precision@%d=%.3f recall@%d=%.3f mrr=%.3f",
                 strategy.value,
                 mode.value,
                 k,
@@ -293,9 +278,32 @@ def run_all(
                 k,
                 r_metrics.recall_at_k,
                 r_metrics.mrr,
-                a_metrics.false_abstention_rate,
-                a_metrics.correct_abstention_rate,
             )
+
+            # Only a mode with a relevance floor can refuse: for the others there is no
+            # abstention to measure, and no out-of-domain retrieval to run.
+            threshold = retriever.min_rerank_score
+            if threshold is not None:
+                a_metrics = abstention_metrics(
+                    strategy,
+                    mode,
+                    threshold,
+                    results,
+                    [abstained(retriever, q.question, k) for q in out_of_domain],
+                )
+                entry["abstention"] = a_metrics.model_dump()
+                logger.info(
+                    "strategy=%s mode=%s floor=%.2f false-abstention=%.3f correct-abstention=%.3f",
+                    strategy.value,
+                    mode.value,
+                    threshold,
+                    a_metrics.false_abstention_rate,
+                    a_metrics.correct_abstention_rate,
+                )
+
+            if not skip_generation:
+                entry["generation"] = generation_metrics(results, strategy, mode).model_dump()
+            strategies.setdefault(strategy.value, {})[mode.value] = entry
 
     report = {
         "k": k,
