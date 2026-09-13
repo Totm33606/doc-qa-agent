@@ -242,10 +242,15 @@ curated set of advanced-guide pages — from the docs *source* of the
 | | **Fixed-size** (`fastapi_docs_fixed`) | **Markdown-aware** (`fastapi_docs_markdown`) |
 |---|---|---|
 | How it splits | `RecursiveCharacterTextSplitter` (paragraph → line → sentence → word → char), blind to structure | By Markdown header first, then the same recursive splitter on sections still over budget |
-| Chunk size / overlap | ~500 / 50 tokens (`tiktoken`) | same |
+| Chunk size / overlap | 450 / 50 tokens, counted with the embedding model's tokenizer | same |
 | Citable unit | no section (`"(no section — fixed-size chunking)"`) | header breadcrumb, e.g. `"Path Parameters > Order matters"` |
-| Chunks (this corpus) | **347** | **693** |
-| Mean tokens/chunk | 428 | 205 |
+| Chunks (this corpus) | **471** | **772** |
+| Mean tokens/chunk | 391 | 229 |
+
+Sizes are counted with the embedding model's own tokenizer, which the re-ranker shares, so every
+chunk fits the models' 512-token window. Nothing is truncated silently: chunking refuses a budget
+that would not fit, the embedder refuses a question that would not, and the re-ranker logs a
+warning when a long question pushes a (question, passage) pair past its window.
 
 The header splitter is hand-rolled (`chunking.py::_split_by_headers`, a fence-aware
 line scanner that never rewrites a line). LangChain's `MarkdownHeaderTextSplitter`
@@ -355,65 +360,63 @@ the corpus cannot answer, where the only correct response is a refusal.
 `eval/run_eval.py` scores all six strategy × mode configurations with the same code.
 
 Numbers from a from-scratch `uv run python -m eval.run_eval --sweep` (38 + 10 questions,
-k=5, `qwen2.5:7b-instruct` via Ollama 0.34 for generation; ~3 h on an RTX 2070 Super),
+k=5, `qwen2.5:7b-instruct` via Ollama 0.34 for generation; ~2 h 20 on an RTX 2070 Super),
 rounded to four decimals:
 
 | Configuration | Precision@5 | Recall@5 | MRR | Mean groundedness |
 |---|---|---|---|---|
-| fixed / dense | 0.5579 | 0.9737 | **0.9079** | **1.0000** |
-| fixed / hybrid | 0.5526 | 0.9737 | 0.9053 | **1.0000** |
-| fixed / hybrid_rerank | 0.4632 | 0.9211 | 0.7895 | 0.9868 |
-| markdown / dense | 0.5789 | 0.9342 | 0.8662 | **1.0000** |
-| **markdown / hybrid** ← default | **0.5895** | **1.0000** | 0.9035 | **1.0000** |
-| markdown / hybrid_rerank | 0.5632 | 0.9605 | 0.8487 | 0.9912 |
+| fixed / dense | 0.5842 | 0.9605 | 0.8640 | 1.0000 |
+| fixed / hybrid | 0.5842 | 0.9737 | 0.8956 | 1.0000 |
+| fixed / hybrid_rerank | 0.5105 | 0.9211 | 0.8268 | 1.0000 |
+| markdown / dense | **0.6000** | 0.9342 | 0.8509 | 1.0000 |
+| **markdown / hybrid** ← default | 0.5947 | **1.0000** | **0.8969** | 1.0000 |
+| markdown / hybrid_rerank | 0.5632 | 0.9737 | 0.8026 | 1.0000 |
 
-**Hybrid search is a pairing, not a free upgrade.** With markdown-aware chunking it
-lifts recall from 0.9342 to **1.0000** (the expected file is in the top 5 for all
-38 questions) and MRR from 0.8662 to 0.9035. With fixed-size chunking it slightly
-hurts (precision 0.5579 → 0.5526, MRR 0.9079 → 0.9053, recall unchanged): 428-token
-chunks dilute term frequency and BM25's length normalization penalizes them, so the
-lexical ranking adds noise.
+**Hybrid search helps both chunking strategies.** It raises recall and MRR on both:
+markdown-aware goes from 0.9342 to **1.0000** recall (the expected file is in the top 5
+for all 38 questions) and from 0.8509 to 0.8969 MRR; fixed-size from 0.9605 to 0.9737
+and from 0.8640 to 0.8956. The only cost is a little precision on markdown-aware
+(0.6000 → 0.5947).
 
-**Groundedness doesn't separate the configurations.** Four score 1.0000 and the two
-re-ranked ones 0.9868 and 0.9912, about one answer's worth each over 38. The metric
+**Groundedness doesn't separate the configurations.** All six score 1.0000. The metric
 checks citation format and validity, which the 7B model gets right whatever it's given.
-At `temperature=0` it is reproducible in a fixed environment (two consecutive full runs
-have produced byte-identical reports), yet `fixed`/`dense` has read 0.9803, 0.9868 and
-1.0000 across environment and corpus changes — so don't read a one-question difference
-as a result.
+Earlier runs, with other chunks or another environment, put single configurations at
+0.9803–0.9912 — one answer's worth over 38 — so don't read such a difference as a result.
 
 **Re-ranking makes retrieval worse on this corpus, and buys the ability to refuse.**
-Compared with `hybrid`, markdown drops precision 0.5895 → 0.5632, recall
-1.0000 → 0.9605 and MRR 0.9035 → 0.8487; fixed drops MRR 0.9053 → 0.7895.
+Compared with `hybrid`, markdown drops precision 0.5947 → 0.5632, recall
+1.0000 → 0.9737 and MRR 0.8969 → 0.8026; fixed drops precision 0.5842 → 0.5105,
+recall 0.9737 → 0.9211 and MRR 0.8956 → 0.8268.
 Disabling the floor (`min_rerank_score=0.0`) separates the two causes:
 
 | Effect (markdown) | Precision@5 | Recall@5 | MRR |
 |---|---|---|---|
-| `hybrid` — fusion only | 0.5895 | 1.0000 | 0.9035 |
-| + cross-encoder re-ordering (floor off) | 0.5789 | 0.9605 | 0.8487 |
-| + relevance floor at 0.2 | 0.5632 | 0.9605 | 0.8487 |
+| `hybrid` — fusion only | 0.5947 | 1.0000 | 0.8969 |
+| + cross-encoder re-ordering (floor off) | 0.5789 | 0.9737 | 0.8026 |
+| + relevance floor at 0.2 | 0.5632 | 0.9737 | 0.8026 |
 
-- **Re-ordering causes all of the MRR loss and most of the recall loss.** The
-  cross-encoder, trained on MS MARCO web passages, is judging API prose full of code
-  and identifiers — a domain shift a 22M-parameter model absorbs poorly. A
-  FastAPI-tuned re-ranker might well reverse the result.
+- **Re-ordering causes all of the MRR loss and most of the recall loss.** Even reading
+  whole passages, the cross-encoder, trained on MS MARCO web passages, is judging API
+  prose full of code and identifiers — a domain shift a 22M-parameter model absorbs
+  poorly. A FastAPI-tuned re-ranker might well reverse the result.
 - **The floor costs precision, not refusals.** No golden question is refused
   (false abstention 0.0000 everywhere); instead, relevant passages scoring below 0.2
   are dropped from answers that still get produced, and precision@5 always divides
-  by 5. On the fixed collection it also cost recall (0.9342 → 0.9211): one question's
-  only chunk from its expected file scored below the floor.
+  by 5. On the fixed collection it also cost recall (0.9342 → 0.9211): on one
+  two-source question, the only chunk from one of its expected files scored below the
+  floor.
 
-**Why `markdown` + `hybrid` is the default.** It is the only configuration
-best-or-tied on three of the four metrics, and the only one with perfect recall.
-Neither added stage is universally worth it: fusion helps one chunking strategy and
-slightly hurts the other; re-ranking hurts both but is the only way to decline to
-answer — so it ships as an opt-in mode.
+**Why `markdown` + `hybrid` is the default.** It has the best recall (the only perfect
+one) and the best MRR, and ties on groundedness; only `markdown` / `dense` beats it, on
+precision (0.6000 against 0.5947). Fusion is worth it on both chunking strategies;
+re-ranking hurts both but is the only way to decline to answer, so it ships as an
+opt-in mode.
 
 **Precision@5 has a structural ceiling, and still real headroom.** 34 of 38 questions
 expect a single file, and precision@k always divides by k=5, so a question scores 1.0
 only if five chunks of its expected file(s) land in the top 5. That ceiling
-(`min(5, chunks in the expected file(s)) / 5`, averaged) is **0.868** (fixed) and
-**0.989** (markdown); the observed 0.463–0.589 is well below it. Recall@5 and MRR
+(`min(5, chunks in the expected file(s)) / 5`, averaged) is **0.926** (fixed) and
+**0.989** (markdown); the observed 0.511–0.600 is well below it. Recall@5 and MRR
 remain the more informative columns for this mostly single-source golden set.
 
 ### Knowing what it doesn't know
@@ -438,17 +441,16 @@ single retrieval pass:
 | 0.02 | 0.0000 | 0.6000 | |
 | **0.2** | **0.0000** | **0.6000** | ← chosen |
 | 0.3 | 0.0263 | 0.6000 | first false abstention |
-| 0.5 | 0.0263 | 0.7000 | |
+| 0.5 | 0.0263 | 0.6000 | |
 
 (Markdown collection; the fixed one is within one question everywhere — full grid
 for both in `eval_report.json`. Lowest in-domain / highest out-of-domain best scores:
-0.2514 / 0.9722 for markdown, 0.2517 / 0.9926 for fixed.)
+0.2514 / 0.9722 for markdown, 0.2652 / 0.9869 for fixed.)
 
 Every threshold from 0.02 to 0.2 gives the same 0.0000 / 0.6000. **0.2 is the upper
 end of that plateau**: it refuses unseen off-topic questions scoring anywhere below
-it, while staying ~20% under the lowest in-domain score (0.2514). 0.3 starts refusing
-real questions; 0.5 trades a false abstention for one more catch — the wrong trade
-for a documentation assistant.
+it, while staying ~20% under the lowest in-domain score (0.2514). Higher floors start
+refusing real questions and, on this collection, catch no extra off-topic one.
 
 **Both rates are in-sample.** The sweep that picked 0.2 used both question sets, so
 0.0000 and 0.6000 are optimistic estimates — the same objection that keeps `rrf_k`
@@ -460,10 +462,10 @@ question (markdown collection):
 | Out-of-domain question | Top re-rank score | Verdict at floor 0.2 |
 |---|---|---|
 | "Django middleware that adds a response header" | **0.9722** | answered — from `tutorial/middleware.md` |
+| "Create a PostgreSQL index for a slow query" | 0.7855 | answered — from `tutorial/sql-databases.md` |
 | "What changed in FastAPI 0.200?" | 0.7609 | answered — from `tutorial/body-nested-models.md` |
 | "Flask blueprint, register it on the app" | 0.6789 | answered — from `tutorial/bigger-applications.md` |
-| "Create a PostgreSQL index for a slow query" | 0.3917 | answered — from `advanced/advanced-dependencies.md` |
-| "DRF serializer to validate incoming data" | 0.0155 | refused |
+| "DRF serializer to validate incoming data" | 0.0195 | refused |
 | "Spring Boot REST controller in Java" | 0.0017 | refused |
 | "Train a random forest with scikit-learn" | 0.0001 | refused |
 | "Docker image vs. container" | 0.0000 | refused |
@@ -526,7 +528,8 @@ uv run uvicorn api.app:app --reload --port 8000
 | `GET /health` | Liveness check |
 
 An abstention is a normal `200`: `abstained: true`, empty `passages` and a refusal
-in `answer`. Only `hybrid_rerank` produces one. There is no frontend.
+in `answer`. Only `hybrid_rerank` produces one. A question too long for the embedding model's
+window is rejected with a `422` rather than silently truncated. There is no frontend.
 
 ### Example
 
@@ -542,7 +545,7 @@ curl -X POST localhost:8000/ask -H "Content-Type: application/json" \
 ```json
 {
   "question": "Why does the order of path operations matter in FastAPI?",
-  "answer": "The order of path operations matters in FastAPI because paths are evaluated in the order they are defined. If the path for `/users/me` is defined after the path for `/users/{user_id}`, the path for `/users/me` would not be matched correctly, as it would be interpreted as a parameter. [source: 1]",
+  "answer": "The order of path operations matters in FastAPI because paths are evaluated in the order they are defined. If the path for `/users/me` is defined after the path for `/users/{user_id}`, the latter would incorrectly match the former, treating `/users/me` as a dynamic path parameter. [source: 1]",
   "citations": [
     {
       "source_file": "tutorial/path-params.md",
@@ -560,11 +563,11 @@ curl -X POST localhost:8000/ask -H "Content-Type: application/json" \
       "rerank_score": null
     },
     {
-      "chunk_id": "markdown:tutorial/path-params-numeric-validations.md:3",
-      "text": "## Order the parameters as you need\n\n> **TIP:**\n> This is probably not as important or necessary if you use `Annotated`...",
-      "source_file": "tutorial/path-params-numeric-validations.md",
-      "section": "Path Parameters and Numeric Validations > Order the parameters as you need",
-      "score": 0.01639344262295082,
+      "chunk_id": "markdown:tutorial/dependencies/index.md:16",
+      "text": "## Integrated with **OpenAPI**\n\nAll these dependencies, while declaring their requirements, also add parameters, validations, etc. to your *path operations*...",
+      "source_file": "tutorial/dependencies/index.md",
+      "section": "Dependencies > Integrated with **OpenAPI**",
+      "score": 0.026709401709401708,
       "rerank_score": null
     }
   ],
@@ -575,10 +578,10 @@ curl -X POST localhost:8000/ask -H "Content-Type: application/json" \
 
 **Reading the scores.** In the hybrid modes `score` is the RRF value, so the fusion
 can be read off it: `0.032522` = `1/61 + 1/62` (first in one ranking, second in the
-other); `0.016393` = `1/61` (first in one ranking, absent from the other — a passage
-the other retriever alone would have missed). In `dense` mode the field is a cosine
-similarity. In `hybrid_rerank`, passages keep the RRF `score`, gain a `rerank_score`,
-and are ordered by the latter.
+other); `0.026709` = `1/72 + 1/78` (12th and 18th — a passage neither retriever ranked
+highly, lifted into the top 5 by appearing in both). In `dense` mode the field is a
+cosine similarity. In `hybrid_rerank`, passages keep the RRF `score`, gain a
+`rerank_score`, and are ordered by the latter.
 
 The same endpoint in `hybrid_rerank` mode, on a question the corpus doesn't cover:
 
@@ -600,12 +603,11 @@ curl -X POST localhost:8000/ask -H "Content-Type: application/json" \
 
 No LLM produced that: the best candidate scored 0.00004 against the 0.2 floor. In
 `hybrid` mode the same question returns five irrelevant passages (led by
-`tutorial/query-params-str-validations.md` and `tutorial/path-params.md`), and here
+`tutorial/query-params-str-validations.md` and `tutorial/sql-databases.md`), and here
 the model happens to refuse correctly:
 
 > The provided passages do not contain information on how to train a random forest
-> in scikit-learn. The passages are related to FastAPI and do not cover machine
-> learning topics. [source: 1][source: 2][source: 3][source: 4][source: 5]
+> in scikit-learn. [source: 1][source: 2][source: 3][source: 4][source: 5]
 
 That refusal even scores groundedness 1.0, since it cites all five passages — a
 reminder that the metric checks citation form, not substance. It is rule 2 of the
@@ -616,7 +618,7 @@ something the model may or may not do on a given question.
 ## Testing & quality gates
 
 ```bash
-uv run pytest                        # 167 tests
+uv run pytest                        # 172 tests
 uv run pytest -m "not integration"   # skip the real-model tests
 uv run ruff check src tests eval
 uv run ruff format --check src tests eval
@@ -629,7 +631,8 @@ uv run mypy src tests eval
   exercises the HTTP code through `httpx.MockTransport`, without real requests.
 - **One integration file.** `tests/test_integration.py` (marker `integration`) loads
   the real embedder and cross-encoder (downloaded on first run) and checks only what
-  the code relies on: re-rank scores in [0, 1] and topical ranking. One test also
+  the code relies on: re-rank scores in [0, 1], topical ranking and the 512-token
+  guards. One test also
   queries the built `data/chroma` store and is skipped if it doesn't exist.
 - **Coverage: 99%** of `src/` and `eval/`; the 6 uncovered statements are the
   `main()` / `__main__` entry points of the three CLIs.
@@ -645,7 +648,7 @@ uv run mypy src tests eval
 | Rank fusion | RRF, `k=60`, hand-rolled (~10 lines) | Ranks are comparable where scores aren't; small enough to own and unit-test against hand-computed values. |
 | Re-ranking | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Small (~22M params, ~90MB) and no new dependency; larger re-rankers (`bge-reranker-base`, ~1.1GB) break the CPU-friendly bar. |
 | Vector store | Chroma, embedded | No server; `PersistentClient` for the corpus, `EphemeralClient` for most tests. |
-| Chunking (fixed) | `RecursiveCharacterTextSplitter`, sized with `tiktoken` | The standard baseline; token sizing makes "~500 tokens" literal. |
+| Chunking (fixed) | `RecursiveCharacterTextSplitter`, sized with the embedding model's tokenizer | The standard baseline; counting in the models' own tokens keeps chunks inside their 512-token window. |
 | Chunking (markdown) | Hand-rolled fence-aware header splitter | LangChain's header splitter destroys code indentation (see [Ingestion & chunking](#ingestion--chunking)). |
 | Generation LLM | Azure OpenAI → local server (Ollama, default) → OpenAI | Azure wins when configured; otherwise the local default keeps the demo free. |
 | Citation format | Passage index `[source: N]` | A small local model copies a digit reliably, not a long `file#section` string. |
@@ -656,7 +659,7 @@ uv run mypy src tests eval
 
 **Design notes**
 - **Corpus committed, vector store not.** `data/raw/` (~752KB of Markdown) makes the
-  eval reproducible offline; `data/chroma/` (~16MB) is derived and gitignored.
+  eval reproducible offline; `data/chroma/` (~17MB) is derived and gitignored.
 - **One pipeline scores every configuration.** `run_all` loops over
   `ChunkingStrategy` × `RetrievalMode` and calls `evaluate_question` identically, so
   adding `hybrid_rerank` required no scoring change.

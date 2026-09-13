@@ -14,6 +14,7 @@ import api.app as app_module
 from common.config import config
 from common.schemas import ChunkingStrategy, DocChunk, RetrievalMode
 from generation.generate import ABSTENTION_ANSWER
+from ingestion.embed import QueryTooLongError
 from ingestion.store import ChunkStore
 from tests.conftest import FakeChatModel, FakeEmbedder, FakeReranker
 
@@ -145,6 +146,22 @@ def test_ask_rejects_invalid_top_k(hermetic_app: object) -> None:
     with TestClient(hermetic_app) as client:  # type: ignore[arg-type]
         response = client.post("/ask", json={"question": "Why does path order matter?", "top_k": 0})
     assert response.status_code == 422
+
+
+def test_ask_returns_422_when_the_question_is_too_long_to_embed(
+    hermetic_app: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _TooLongEmbedder(FakeEmbedder):
+        def embed_query(self, text: str) -> list[float]:
+            raise QueryTooLongError("The question is too long to embed: 600 tokens.")
+
+    monkeypatch.setattr(app_module, "BGEEmbedder", _TooLongEmbedder)
+
+    with TestClient(hermetic_app) as client:  # type: ignore[arg-type]
+        response = client.post("/ask", json={"question": "A pasted document..."})
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "The question is too long to embed: 600 tokens."
 
 
 @pytest.mark.parametrize("error", [ValueError, RuntimeError])

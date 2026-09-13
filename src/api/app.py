@@ -16,7 +16,7 @@ from fastapi import FastAPI, HTTPException
 
 from common.schemas import AskRequest, AskResponse, ChunkingStrategy, RetrievalMode
 from generation.generate import generate_answer
-from ingestion.embed import BGEEmbedder, Embedder
+from ingestion.embed import BGEEmbedder, Embedder, QueryTooLongError
 from retrieval.rerank import CrossEncoderReranker, Reranker
 from retrieval.retriever import Retriever
 
@@ -82,6 +82,8 @@ def ask(payload: AskRequest) -> AskResponse:
         return runtime.ask(payload)
     except RuntimeNotStartedError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except QueryTooLongError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Ask failed for question=%r", payload.question)
         raise HTTPException(status_code=502, detail=str(exc)) from exc

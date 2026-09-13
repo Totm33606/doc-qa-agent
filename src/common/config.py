@@ -24,9 +24,11 @@ class DocQAConfig(BaseSettings):
     fastapi_repo_ref: str = "0.141.1"
 
     # --- Chunking ------------------------------------------------------
-    chunk_size_tokens: int = 500
+    # Counted in the embedding model's WordPiece tokens, which the re-ranker shares. 450 keeps
+    # chunks inside the 512-token window and leaves room for the question in the re-ranker's
+    # (question, passage) pairs: the longest eval question is 53 tokens.
+    chunk_size_tokens: int = 450
     chunk_overlap_tokens: int = 50
-    token_encoding: str = "cl100k_base"
 
     # --- Embeddings ------------------------------------------------------
     embedding_model_name: str = "BAAI/bge-small-en-v1.5"

@@ -5,12 +5,14 @@ Marked `integration`: skip locally with `pytest -m "not integration"`; CI runs t
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from common.config import config
 from common.schemas import ChunkingStrategy, DocChunk, RetrievedPassage
 from eval.run_eval import load_golden_set
-from ingestion.embed import BGEEmbedder
+from ingestion.embed import BGEEmbedder, QueryTooLongError
 from ingestion.store import ChunkStore
 from retrieval.rerank import CrossEncoderReranker
 from retrieval.retriever import Retriever
@@ -63,6 +65,15 @@ def test_real_embedder_query_vector_has_configured_dimension() -> None:
     assert len(vector) == config.embedding_dim
 
 
+def test_real_embedder_refuses_a_question_one_token_past_its_window() -> None:
+    """502 one-token words + the 8-token instruction + [CLS]/[SEP] is exactly 512."""
+    embedder = BGEEmbedder()
+
+    assert len(embedder.embed_query("word " * 502)) == config.embedding_dim
+    with pytest.raises(QueryTooLongError, match="513 tokens"):
+        embedder.embed_query("word " * 503)
+
+
 def _passage(chunk_id: str, text: str) -> RetrievedPassage:
     return RetrievedPassage(
         chunk_id=chunk_id,
@@ -90,6 +101,20 @@ def test_real_reranker_scores_are_probabilities_in_the_unit_interval() -> None:
 def test_real_reranker_on_no_passages_returns_nothing() -> None:
     """Guards the empty-batch case (e.g. an empty collection)."""
     assert CrossEncoderReranker().score("anything", []) == []
+
+
+def test_real_reranker_warns_when_a_long_question_overflows_its_window(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    passage = _passage("long", "FastAPI path operations are matched in declaration order. " * 35)
+    reranker = CrossEncoderReranker()
+
+    with caplog.at_level(logging.WARNING, logger="retrieval.rerank"):
+        reranker.score("Why does path order matter?", [passage])
+        assert not caplog.records
+        reranker.score("Why does path order matter? " * 40, [passage])
+
+    assert "truncated before scoring" in caplog.text
 
 
 def test_real_reranker_prefers_the_topically_relevant_passage() -> None:

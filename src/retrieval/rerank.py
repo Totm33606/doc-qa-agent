@@ -8,11 +8,14 @@ comparable across questions, which is what the relevance floor in `retriever.py`
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Protocol
 
 from common.config import config
 from common.schemas import RetrievedPassage
+
+logger = logging.getLogger(__name__)
 
 
 def _sigmoid(x: float) -> float:
@@ -42,6 +45,27 @@ class CrossEncoderReranker:
     def score(self, question: str, passages: list[RetrievedPassage]) -> list[float]:
         if not passages:
             return []
+        self._warn_if_truncated(question, passages)
         pairs = [(question, p.text) for p in passages]
         logits = self._model.predict(pairs, show_progress_bar=False)
         return [_sigmoid(float(logit)) for logit in logits]
+
+    def _warn_if_truncated(self, question: str, passages: list[RetrievedPassage]) -> None:
+        """Log (question, passage) pairs longer than the model's window, which it truncates silently.
+
+        Chunks are sized to fit alongside every eval question, but a question sent to `/ask`
+        has no length limit; the model then trims the longer side, usually the passage.
+        """
+        tokenizer = self._model.tokenizer
+        budget = self._model.max_seq_length - tokenizer.num_special_tokens_to_add(pair=True)
+        question_tokens = len(tokenizer.tokenize(question))
+        n_over = sum(question_tokens + len(tokenizer.tokenize(p.text)) > budget for p in passages)
+        if n_over:
+            logger.warning(
+                "Question (%d tokens) plus passage exceeds the re-ranker's %d-token window for "
+                "%d of %d passages; they are truncated before scoring.",
+                question_tokens,
+                self._model.max_seq_length,
+                n_over,
+                len(passages),
+            )

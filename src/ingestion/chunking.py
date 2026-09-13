@@ -1,4 +1,7 @@
-"""Two chunking strategies sharing one token budget, sized in real tokens with `tiktoken`.
+"""Two chunking strategies sharing one token budget, counted in the embedding model's tokens.
+
+Counting with the models' own WordPiece tokenizer (shared by the embedder and the
+re-ranker) keeps every chunk inside their 512-token window.
 
 - `chunk_fixed`: `RecursiveCharacterTextSplitter` over paragraph -> line -> sentence ->
   word -> char separators, blind to document structure.
@@ -13,15 +16,17 @@ every line, code blocks included, which destroys Python indentation.
 from __future__ import annotations
 
 import re
+from functools import cache
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import tiktoken
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from common.config import config
 from common.schemas import ChunkingStrategy, DocChunk
 
-_encoding = tiktoken.get_encoding(config.token_encoding)
+if TYPE_CHECKING:
+    from tokenizers import Tokenizer
 
 # Paragraph, line, sentence, word, character: tried in order until a piece fits the budget.
 _SEPARATORS = ["\n\n", "\n", ". ", " ", ""]
@@ -34,8 +39,28 @@ _NO_SECTION = "(no section — fixed-size chunking)"
 _DOCUMENT_ROOT = "(document root)"
 
 
+@cache
+def _load_tokenizer() -> tuple[Tokenizer, int]:
+    """The embedding model's tokenizer and the content tokens its window holds, loaded once.
+
+    The re-ranker's tokenizer and window are identical.
+    """
+    from transformers import AutoTokenizer
+
+    hf_tokenizer = AutoTokenizer.from_pretrained(config.embedding_model_name)
+    tokenizer: Tokenizer = hf_tokenizer.backend_tokenizer
+    tokenizer.no_truncation()  # a preset truncation would silently cap every count
+    window = hf_tokenizer.model_max_length - hf_tokenizer.num_special_tokens_to_add()
+    return tokenizer, window
+
+
+def _tokenizer() -> Tokenizer:
+    return _load_tokenizer()[0]
+
+
 def count_tokens(text: str) -> int:
-    return len(_encoding.encode(text))
+    """Length in the embedding model's tokens, excluding [CLS] and [SEP]."""
+    return len(_tokenizer().encode(text, add_special_tokens=False).ids)
 
 
 def _chunk_id(source_file: str, strategy: ChunkingStrategy, index: int) -> str:
@@ -43,6 +68,12 @@ def _chunk_id(source_file: str, strategy: ChunkingStrategy, index: int) -> str:
 
 
 def _recursive_splitter() -> RecursiveCharacterTextSplitter:
+    window = _load_tokenizer()[1]
+    if config.chunk_size_tokens > window:
+        raise ValueError(
+            f"chunk_size_tokens={config.chunk_size_tokens} exceeds the {window} tokens "
+            f"{config.embedding_model_name} can embed: oversized chunks would be silently truncated"
+        )
     return RecursiveCharacterTextSplitter(
         chunk_size=config.chunk_size_tokens,
         chunk_overlap=config.chunk_overlap_tokens,

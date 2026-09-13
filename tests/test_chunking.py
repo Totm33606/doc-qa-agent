@@ -2,9 +2,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from common.config import config
 from common.schemas import ChunkingStrategy
-from ingestion.chunking import chunk_corpus, chunk_fixed, chunk_markdown_aware, count_tokens
+from eval.run_eval import load_golden_set, load_out_of_domain
+from ingestion.chunking import (
+    _tokenizer,
+    chunk_corpus,
+    chunk_fixed,
+    chunk_markdown_aware,
+    count_tokens,
+)
 
 SAMPLE_MARKDOWN = """\
 # Title Section
@@ -87,10 +96,34 @@ def test_chunk_markdown_aware_splits_oversized_section() -> None:
     assert all(c.token_count <= config.chunk_size_tokens for c in chunks)
 
 
-def test_count_tokens_matches_tiktoken_semantics() -> None:
+def test_count_tokens_uses_the_embedding_models_wordpiece_tokens() -> None:
     assert count_tokens("") == 0
-    assert count_tokens("hello world") > 0
-    assert count_tokens("hello world " * 100) > count_tokens("hello world")
+    # WordPiece splits identifiers finely: 10 tokens here, against 5 for tiktoken's cl100k.
+    assert count_tokens("response_model_exclude_unset=True") == 10
+
+
+def test_chunks_and_the_longest_question_fit_the_512_token_window() -> None:
+    """Regression: a budget counted in tiktoken tokens let most fixed-size chunks overflow 512."""
+    questions = [q.question for q in load_golden_set()] + [q.question for q in load_out_of_domain()]
+    longest_question = max(count_tokens(q) for q in questions)
+    code_heavy = 'Set response_model_exclude_unset=True on @app.get("/users/{user_id}"). ' * 300
+
+    chunks = chunk_fixed(code_heavy, "fake.md")
+
+    assert len(chunks) > 1
+    for chunk in chunks:
+        # [CLS] question [SEP] passage [SEP]: the passage's own [CLS]/[SEP] plus one more.
+        assert len(_tokenizer().encode(chunk.text).ids) + longest_question + 1 <= 512
+
+
+def test_a_chunk_budget_larger_than_the_model_window_fails_fast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Oversized chunks would be silently truncated at embedding time, so refuse to build them."""
+    monkeypatch.setattr(config, "chunk_size_tokens", 600)
+
+    with pytest.raises(ValueError, match="chunk_size_tokens=600"):
+        chunk_fixed("Some text.", "fake.md")
 
 
 def test_chunk_corpus_over_real_data_dir_is_non_empty() -> None:

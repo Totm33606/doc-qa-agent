@@ -10,6 +10,10 @@ from common.config import config
 _QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: "
 
 
+class QueryTooLongError(ValueError):
+    """The question does not fit the embedding model's window, which would silently cut its end."""
+
+
 class Embedder(Protocol):
     def embed_documents(self, texts: list[str]) -> list[list[float]]: ...
 
@@ -29,7 +33,13 @@ class BGEEmbedder:
         return [v.tolist() for v in vectors]
 
     def embed_query(self, text: str) -> list[float]:
-        vector = self._model.encode(
-            [_QUERY_INSTRUCTION + text], normalize_embeddings=True, show_progress_bar=False
-        )[0]
-        return list(vector.tolist())
+        query = _QUERY_INSTRUCTION + text
+        tokenizer = self._model.tokenizer
+        n_tokens = len(tokenizer.tokenize(query)) + tokenizer.num_special_tokens_to_add()
+        if n_tokens > self._model.max_seq_length:
+            raise QueryTooLongError(
+                f"The question is too long to embed: {n_tokens} tokens with the query "
+                f"instruction, over the model's {self._model.max_seq_length}-token window."
+            )
+        vector = self._model.encode([query], normalize_embeddings=True, show_progress_bar=False)
+        return list(vector[0].tolist())
