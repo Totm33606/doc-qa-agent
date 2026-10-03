@@ -9,6 +9,7 @@ license = { text = "MIT" }
 
 dependencies = [
     "sentence-transformers>=3.3.1",
+    "torch>=2.5.0",  # declared only to pin its CPU build on Linux, see [tool.uv.sources]
     "chromadb>=0.5.20",
     "rank-bm25>=0.2.2",
     "transformers>=4.41.0",
@@ -19,6 +20,7 @@ dependencies = [
     "pydantic-settings>=2.6.1",
     "langchain-core>=0.3.15",
     "langchain-openai>=0.2.6,<0.3.0",
+    "openai>=1.0.0",  # imported directly for its exception types
     "httpx>=0.27.2",
     "python-dotenv>=1.0.1",
     "pyyaml>=6.0.2",
@@ -37,6 +39,16 @@ dev = [
 [project.scripts]
 docqa-fetch = "ingestion.fetch:main"
 docqa-build = "ingestion.build:main"
+
+[tool.uv.sources]
+# PyPI's Linux torch wheels pull in CUDA (several GB of nvidia-* packages), but both models
+# run on CPU: Linux (CI, Docker) gets the CPU build. Windows and macOS wheels are CPU already.
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.ruff]
 line-length = 100

@@ -33,4 +33,4 @@ fmt:
 # Python rather than `rm` so it also works when GNU Make uses cmd.exe (Windows);
 # one line because a trailing backslash means different things to sh and cmd.
 clean:
-	uv run python -c "import pathlib,shutil;rm=lambda p:shutil.rmtree(p,ignore_errors=True);[rm(d) for d in ('data/chroma','.pytest_cache','.ruff_cache','.mypy_cache')];[rm(d) for d in pathlib.Path('.').rglob('__pycache__')];[pathlib.Path(f).unlink(missing_ok=True) for f in ('eval/eval_report.json','eval/eval_details.md','.coverage')]"
+	uv run python -c "import pathlib,shutil;rm=lambda p:shutil.rmtree(p,ignore_errors=True);[rm(d) for d in ('data/chroma','.pytest_cache','.ruff_cache','.mypy_cache')];[rm(d) for d in pathlib.Path('.').rglob('__pycache__')];[pathlib.Path(f).unlink(missing_ok=True) for f in ('eval/eval_report.json','eval/eval_details.md','.coverage','coverage.xml')]"

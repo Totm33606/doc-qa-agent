@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from common.config import config
 
@@ -71,7 +71,9 @@ class Citation(BaseModel):
 
 
 class AskRequest(BaseModel):
-    question: str
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    question: str = Field(..., min_length=1)
     top_k: int = Field(config.default_top_k, ge=1, le=20)
     strategy: ChunkingStrategy = ChunkingStrategy.MARKDOWN
     mode: RetrievalMode = RetrievalMode.HYBRID

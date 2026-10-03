@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
+import openai
 import pytest
 from fastapi.testclient import TestClient
 
@@ -164,22 +166,59 @@ def test_ask_returns_422_when_the_question_is_too_long_to_embed(
     assert response.json()["detail"] == "The question is too long to embed: 600 tokens."
 
 
-@pytest.mark.parametrize("error", [ValueError, RuntimeError])
-def test_ask_returns_502_on_unexpected_generation_failure(
-    hermetic_app: object, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
-) -> None:
-    """Only a not-started runtime is a 503 — a RuntimeError raised downstream is a 502."""
+@pytest.mark.parametrize("question", ["", "   "])
+def test_ask_rejects_an_empty_question(hermetic_app: object, question: str) -> None:
+    with TestClient(hermetic_app) as client:  # type: ignore[arg-type]
+        response = client.post("/ask", json={"question": question})
+    assert response.status_code == 422
 
+
+def _raise_from_llm(monkeypatch: pytest.MonkeyPatch, error: Exception) -> None:
     class _RaisingChatModel:
         def invoke(self, messages: object) -> object:
-            raise error("simulated LLM failure")
+            raise error
 
     monkeypatch.setattr("generation.generate.build_llm", lambda: _RaisingChatModel())
+
+
+def test_ask_returns_502_when_the_llm_provider_fails(
+    hermetic_app: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The detail is generic: the provider's message may carry URLs or deployment names."""
+    request = httpx.Request("POST", "http://internal-llm-host:11434/v1/chat/completions")
+    _raise_from_llm(monkeypatch, openai.APIConnectionError(request=request))
 
     with TestClient(hermetic_app) as client:  # type: ignore[arg-type]
         response = client.post("/ask", json={"question": "Why does path order matter?"})
 
     assert response.status_code == 502
+    assert "internal-llm-host" not in response.text
+
+
+@pytest.mark.parametrize("error", [ValueError, RuntimeError, KeyError])
+def test_ask_returns_a_generic_500_on_a_bug(
+    hermetic_app: object, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+) -> None:
+    """Only a provider failure is a 502: a bug must not pass for an upstream outage."""
+    _raise_from_llm(monkeypatch, error("secret internal detail"))
+
+    with TestClient(hermetic_app, raise_server_exceptions=False) as client:  # type: ignore[arg-type]
+        response = client.post("/ask", json={"question": "Why does path order matter?"})
+
+    assert response.status_code == 500
+    assert "secret internal detail" not in response.text
+
+
+def test_runtime_shares_one_bm25_index_between_the_modes_of_a_strategy(
+    hermetic_app: object,
+) -> None:
+    with TestClient(hermetic_app):  # type: ignore[arg-type]
+        retrievers = app_module.runtime.retrievers
+        for strategy in ChunkingStrategy:
+            hybrid = retrievers[(strategy, RetrievalMode.HYBRID)]
+            rerank = retrievers[(strategy, RetrievalMode.HYBRID_RERANK)]
+            assert hybrid._lexical is not None
+            assert hybrid._lexical is rerank._lexical
 
 
 def test_ask_before_startup_returns_503() -> None:

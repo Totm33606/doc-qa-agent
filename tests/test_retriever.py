@@ -5,7 +5,7 @@ import pytest
 from common.config import config
 from common.schemas import ChunkingStrategy, DocChunk, RetrievalMode
 from ingestion.store import ChunkStore
-from retrieval.retriever import Retriever, _fuse_rrf
+from retrieval.retriever import LexicalIndex, Retriever, _fuse_rrf
 from tests.conftest import FakeEmbedder, FakeReranker
 
 embedder = FakeEmbedder()
@@ -154,6 +154,27 @@ def test_hybrid_passages_carry_the_fused_score_and_full_metadata() -> None:
     assert top.text.startswith("set response_model_exclude_unset")
     # An RRF score, not a cosine similarity: best possible is 1/61 + 1/61.
     assert 0.0 < top.score <= 2 / 61
+
+
+def test_hybrid_uses_an_injected_lexical_index_instead_of_rereading_the_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _lexical_store("retriever_hybrid_shared_index")
+    shared = LexicalIndex.from_store(store)
+
+    def _fail() -> list[DocChunk]:
+        raise AssertionError("the injected index should be reused, not rebuilt")
+
+    monkeypatch.setattr(store, "get_all", _fail)
+    retriever = Retriever(
+        embedder,
+        ChunkingStrategy.MARKDOWN,
+        RetrievalMode.HYBRID,
+        store=store,
+        lexical_index=shared,
+    )
+
+    assert retriever.retrieve("response_model_exclude_unset", top_k=3)[0].chunk_id == "lexical"
 
 
 def test_hybrid_respects_top_k() -> None:

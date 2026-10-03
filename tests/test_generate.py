@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import httpx
+import openai
 import pytest
 
 from common.schemas import RetrievedPassage
 from generation.generate import (
     ABSTENTION_ANSWER,
+    GenerationError,
     compute_groundedness,
     extract_citations,
     generate_answer,
@@ -247,3 +250,36 @@ def test_generate_answer_passes_system_and_human_messages() -> None:
     content = messages[1].content
     assert isinstance(content, str)
     assert content.startswith("Question: A question")
+
+
+class _RaisingChatModel:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    def invoke(self, messages: object) -> object:
+        raise self.error
+
+
+_LLM_REQUEST = httpx.Request("POST", "http://localhost:11434/v1/chat/completions")
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        openai.APIConnectionError(request=_LLM_REQUEST),
+        openai.APITimeoutError(request=_LLM_REQUEST),
+        openai.NotFoundError(
+            "model not found", response=httpx.Response(404, request=_LLM_REQUEST), body=None
+        ),
+    ],
+)
+def test_generate_answer_wraps_provider_failures_in_generation_error(error: Exception) -> None:
+    with pytest.raises(GenerationError) as exc_info:
+        generate_answer("A question", PASSAGES, llm=_RaisingChatModel(error))  # type: ignore[arg-type]
+    assert exc_info.value.__cause__ is error
+
+
+def test_generate_answer_lets_other_errors_propagate_unwrapped() -> None:
+    """Only provider failures become `GenerationError`: a bug keeps its own type."""
+    with pytest.raises(KeyError):
+        generate_answer("A question", PASSAGES, llm=_RaisingChatModel(KeyError("bug")))  # type: ignore[arg-type]

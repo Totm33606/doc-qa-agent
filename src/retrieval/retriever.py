@@ -26,6 +26,19 @@ _LEXICAL_MODES = frozenset({RetrievalMode.HYBRID, RetrievalMode.HYBRID_RERANK})
 
 
 @dataclass(frozen=True)
+class LexicalIndex:
+    """A collection's chunks by id and the BM25 index over them, shareable across modes."""
+
+    chunks: dict[str, DocChunk]
+    bm25: BM25Index
+
+    @classmethod
+    def from_store(cls, store: ChunkStore) -> LexicalIndex:
+        chunks = store.get_all()
+        return cls(chunks={c.chunk_id: c for c in chunks}, bm25=BM25Index(chunks))
+
+
+@dataclass(frozen=True)
 class _RerankStage:
     """A re-ranker and the floor applied to its scores: a mode has both or neither."""
 
@@ -55,14 +68,16 @@ class Retriever:
         store: ChunkStore | None = None,
         reranker: Reranker | None = None,
         min_rerank_score: float | None = None,
+        lexical_index: LexicalIndex | None = None,
     ) -> None:
         """Build a retriever for one collection.
 
-        `store` and `reranker` are built from `config` when omitted; pass them to inject
-        fakes or to share one loaded re-ranker. `reranker` and `min_rerank_score` are
-        ignored unless `mode` is `HYBRID_RERANK`, so callers can build every mode with
-        the same call. `min_rerank_score` overrides `config.rerank_min_score` (`0.0`
-        disables the floor).
+        `store`, `reranker` and `lexical_index` are built from `config` when omitted; pass
+        them to inject fakes or to share one loaded re-ranker or BM25 index between modes.
+        `lexical_index` must come from the same store. `reranker` and `min_rerank_score`
+        are ignored unless `mode` is `HYBRID_RERANK`, and `lexical_index` in `dense` mode,
+        so callers can build every mode with the same call. `min_rerank_score` overrides
+        `config.rerank_min_score` (`0.0` disables the floor).
         """
         self._embedder = embedder
         self._strategy = strategy
@@ -70,12 +85,9 @@ class Retriever:
         self._store = store or ChunkStore(
             persist_dir=config.chroma_dir, collection_name=config.collection_name(strategy.value)
         )
-        self._chunks: dict[str, DocChunk] = {}
-        self._bm25: BM25Index | None = None
+        self._lexical: LexicalIndex | None = None
         if mode in _LEXICAL_MODES:
-            chunks = self._store.get_all()
-            self._chunks = {c.chunk_id: c for c in chunks}
-            self._bm25 = BM25Index(chunks)
+            self._lexical = lexical_index or LexicalIndex.from_store(self._store)
 
         self._rerank: _RerankStage | None = None
         if mode is RetrievalMode.HYBRID_RERANK:
@@ -100,19 +112,20 @@ class Retriever:
     def retrieve(self, question: str, top_k: int | None = None) -> list[RetrievedPassage]:
         k = top_k or config.default_top_k
         query_embedding = self._embedder.embed_query(question)
-        if self._bm25 is None:  # dense mode
+        if self._lexical is None:  # dense mode
             return self._store.query(query_embedding, top_k=k)
 
         # More than k candidates per side, so BM25 can surface passages dense search missed.
         n = max(k, config.hybrid_candidates)
         dense = self._store.query(query_embedding, top_k=n)
-        lexical = self._bm25.search(question, top_k=n)
+        lexical = self._lexical.bm25.search(question, top_k=n)
 
+        chunks = self._lexical.chunks
         fused = _fuse_rrf([[p.chunk_id for p in dense], lexical], config.rrf_k)
         candidates = [
-            self._as_passage(chunk_id, score)
+            self._as_passage(chunks[chunk_id], score)
             for chunk_id, score in fused
-            if chunk_id in self._chunks  # defensive: both rankings come from this store
+            if chunk_id in chunks  # defensive: both rankings come from this store
         ]
 
         if self._rerank is None:
@@ -134,8 +147,8 @@ class Retriever:
         scored.sort(key=lambda pair: pair[1], reverse=True)  # stable: ties keep fused order
         return [passage for passage, score in scored if score >= stage.min_score][:k]
 
-    def _as_passage(self, chunk_id: str, score: float) -> RetrievedPassage:
-        chunk = self._chunks[chunk_id]
+    @staticmethod
+    def _as_passage(chunk: DocChunk, score: float) -> RetrievedPassage:
         return RetrievedPassage(
             chunk_id=chunk.chunk_id,
             text=chunk.text,

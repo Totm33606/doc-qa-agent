@@ -10,6 +10,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import typer
 
 from common.config import config
 from ingestion.fetch import _inline_snippets, run
@@ -54,6 +55,15 @@ def test_inline_snippets_handles_404_gracefully() -> None:
     assert "After" in result
 
 
+def test_inline_snippets_records_the_url_of_a_failed_snippet() -> None:
+    client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(500)))
+    failed: list[str] = []
+
+    _inline_snippets("{* ../../docs_src/missing.py *}", "0.1.0", client, failed)
+
+    assert failed == ["https://raw.githubusercontent.com/fastapi/fastapi/0.1.0/docs_src/missing.py"]
+
+
 def test_inline_snippets_skips_non_docs_src_macros_without_a_network_call() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("should never be called — path has no docs_src/ anchor")
@@ -82,8 +92,8 @@ def _mock_handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text="# Fake Page\n\n{* ../../docs_src/fake/example.py *}\n")
     if url.endswith("docs_src/fake/example.py"):
         return httpx.Response(200, text="def hello():\n    return 'hi'\n")
-    if url.endswith("docs/en/docs/tutorial/missing-page.md"):
-        return httpx.Response(404)
+    if url.endswith("docs/en/docs/tutorial/page-with-missing-snippet.md"):
+        return httpx.Response(200, text="# Page\n\n{* ../../docs_src/fake/missing.py *}\n")
     return httpx.Response(404)
 
 
@@ -108,20 +118,48 @@ def test_run_fetches_cleans_and_writes_pages_plus_manifest(
     assert manifest["ref"] == "test-ref"
     assert manifest["pages"] == ["tutorial/fake-page.md"]
     assert manifest["n_pages_fetched"] == 1
+    assert manifest["failed_pages"] == []
+    assert manifest["failed_snippets"] == []
 
 
-def test_run_skips_pages_that_fail_to_fetch(
+def test_run_skips_pages_that_fail_to_fetch_and_exits_with_an_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     raw_dir = tmp_path / "raw"
-    monkeypatch.setattr("ingestion.fetch.CORPUS_PAGES", ["tutorial/missing-page.md"])
+    monkeypatch.setattr(
+        "ingestion.fetch.CORPUS_PAGES", ["tutorial/fake-page.md", "tutorial/missing-page.md"]
+    )
     monkeypatch.setattr(config, "raw_docs_dir", raw_dir)
     monkeypatch.setattr(config, "corpus_manifest_path", raw_dir / "manifest.json")
     monkeypatch.setattr("ingestion.fetch.httpx.Client", _mock_client)
 
-    run(ref="test-ref")
+    with pytest.raises(typer.Exit) as exc_info:
+        run(ref="test-ref")
 
+    assert exc_info.value.exit_code == 1
+    assert (raw_dir / "tutorial" / "fake-page.md").exists()
     assert not (raw_dir / "tutorial" / "missing-page.md").exists()
     manifest = json.loads((raw_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["pages"] == []
-    assert manifest["n_pages_fetched"] == 0
+    assert manifest["pages"] == ["tutorial/fake-page.md"]
+    assert manifest["n_pages_fetched"] == 1
+    assert manifest["failed_pages"] == ["tutorial/missing-page.md"]
+
+
+def test_run_exits_with_an_error_when_a_snippet_fails_to_fetch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The page is written without its code, so the corpus is incomplete: fail loudly."""
+    raw_dir = tmp_path / "raw"
+    monkeypatch.setattr("ingestion.fetch.CORPUS_PAGES", ["tutorial/page-with-missing-snippet.md"])
+    monkeypatch.setattr(config, "raw_docs_dir", raw_dir)
+    monkeypatch.setattr(config, "corpus_manifest_path", raw_dir / "manifest.json")
+    monkeypatch.setattr("ingestion.fetch.httpx.Client", _mock_client)
+
+    with pytest.raises(typer.Exit):
+        run(ref="test-ref")
+
+    manifest = json.loads((raw_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["pages"] == ["tutorial/page-with-missing-snippet.md"]
+    assert manifest["failed_snippets"] == [
+        "https://raw.githubusercontent.com/fastapi/fastapi/test-ref/docs_src/fake/missing.py"
+    ]

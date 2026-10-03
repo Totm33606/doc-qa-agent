@@ -132,11 +132,14 @@ def _snippet_url(macro_path: str, ref: str) -> str | None:
     return f"{RAW_BASE}/{ref}/{anchored}"
 
 
-def _inline_snippets(markdown: str, ref: str, client: httpx.Client) -> str:
+def _inline_snippets(
+    markdown: str, ref: str, client: httpx.Client, failed_urls: list[str] | None = None
+) -> str:
     """Resolve every `{* path [ln[a:b]] [hl[...]] [title[...]] *}` macro to a code block.
 
     The `ln[a:b]` selector (1-indexed, inclusive) is honored: pages like `sql-databases.md`
-    show the same file many times, a few lines at a time.
+    show the same file many times, a few lines at a time. A snippet that fails to download
+    is dropped from the page and its URL appended to `failed_urls`.
     """
 
     def _replace(match: re.Match[str]) -> str:
@@ -147,6 +150,8 @@ def _inline_snippets(markdown: str, ref: str, client: httpx.Client) -> str:
         response = client.get(url, timeout=15.0)
         if response.status_code != 200:
             logger.warning("Snippet fetch failed (%s): %s", response.status_code, url)
+            if failed_urls is not None:
+                failed_urls.append(url)
             return ""
         code = response.text.rstrip("\n")
         line_range = _LINE_RANGE.search(match.group("selectors"))
@@ -180,20 +185,27 @@ def _strip_termy_divs(markdown: str) -> str:
 
 @app.command()
 def run(ref: str = typer.Option(None, help="FastAPI git ref/tag to pin the corpus to.")) -> None:
-    """Fetch, clean and write every page in CORPUS_PAGES to data/raw/, plus a manifest."""
+    """Fetch, clean and write every page in CORPUS_PAGES to data/raw/, plus a manifest.
+
+    Exits with status 1 if any page or snippet failed to download: the corpus is then
+    incomplete, and the manifest lists what is missing.
+    """
     resolved_ref = ref or config.fastapi_repo_ref
     config.raw_docs_dir.mkdir(parents=True, exist_ok=True)
 
     fetched: list[str] = []
+    failed_pages: list[str] = []
+    failed_snippets: list[str] = []
     with httpx.Client(follow_redirects=True) as client:
         for page in CORPUS_PAGES:
             url = f"{RAW_BASE}/{resolved_ref}/docs/en/docs/{page}"
             response = client.get(url, timeout=15.0)
             if response.status_code != 200:
                 logger.warning("Page fetch failed (%s): %s", response.status_code, url)
+                failed_pages.append(page)
                 continue
 
-            cleaned = _inline_snippets(response.text, resolved_ref, client)
+            cleaned = _inline_snippets(response.text, resolved_ref, client, failed_snippets)
             cleaned = _flatten_admonitions(cleaned)
             cleaned = _strip_header_ids(cleaned)
             cleaned = _strip_termy_divs(cleaned)
@@ -210,6 +222,8 @@ def run(ref: str = typer.Option(None, help="FastAPI git ref/tag to pin the corpu
         "n_pages_requested": len(CORPUS_PAGES),
         "n_pages_fetched": len(fetched),
         "pages": fetched,
+        "failed_pages": failed_pages,
+        "failed_snippets": failed_snippets,
     }
     config.corpus_manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     logger.info(
@@ -219,6 +233,14 @@ def run(ref: str = typer.Option(None, help="FastAPI git ref/tag to pin the corpu
         resolved_ref,
         config.raw_docs_dir,
     )
+    if failed_pages or failed_snippets:
+        logger.error(
+            "Incomplete corpus: %d page(s) and %d snippet(s) failed to download; see %s",
+            len(failed_pages),
+            len(failed_snippets),
+            config.corpus_manifest_path,
+        )
+        raise typer.Exit(code=1)
 
 
 def main() -> None:

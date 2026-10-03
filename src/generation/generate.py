@@ -6,7 +6,8 @@ counts when it trails claim text. This is a syntactic proxy: it catches citation
 passages never shown, not claims the cited passage doesn't support.
 
 With no passages (nothing cleared the relevance floor), `generate_answer` returns a
-fixed refusal without calling the LLM.
+fixed refusal without calling the LLM. A provider failure is raised as `GenerationError`,
+so the API can tell it apart from a bug.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from __future__ import annotations
 import re
 from typing import Protocol
 
+import openai
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from common.schemas import AskResponse, Citation, RetrievedPassage
@@ -33,6 +35,10 @@ ABSTENTION_ANSWER = (
     "I couldn't find anything in the FastAPI documentation relevant to this question, "
     "so I won't try to answer it."
 )
+
+
+class GenerationError(RuntimeError):
+    """The LLM provider could not be reached, timed out or rejected the request."""
 
 
 class ChatModel(Protocol):
@@ -110,7 +116,10 @@ def generate_answer(
         SystemMessage(content=SYSTEM_PROMPT),
         HumanMessage(content=build_user_message(question, passages)),
     ]
-    response = model.invoke(messages)
+    try:
+        response = model.invoke(messages)
+    except openai.APIError as exc:  # connection, timeout and every HTTP error status
+        raise GenerationError(f"LLM call failed: {exc}") from exc
     answer_text = response.content if isinstance(response.content, str) else str(response.content)
 
     citations = extract_citations(answer_text, passages)

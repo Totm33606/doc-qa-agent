@@ -34,7 +34,8 @@ class CrossEncoderReranker:
     """`cross-encoder/ms-marco-MiniLM-L-6-v2` via `sentence-transformers` (~22M params, CPU).
 
     The checkpoint declares an identity output activation, so `predict` returns raw logits
-    (-11.4 to +8.6 on this corpus); the sigmoid is applied here explicitly.
+    (-11.5 to +8.6 over the candidates of the 48 eval questions); the sigmoid is applied
+    here explicitly.
     """
 
     def __init__(self, model_name: str | None = None) -> None:

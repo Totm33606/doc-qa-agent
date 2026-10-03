@@ -167,7 +167,8 @@ doc-qa-agent/
 │   └── run_eval.py             # retrieval / groundedness / abstention metrics
 ├── tests/                      # hermetic pytest suite + 1 real-model integration file
 ├── docker/Dockerfile           # bakes corpus, vector store and models into the image
-└── .github/workflows/ci.yml    # lint, format, typecheck, build store, test
+├── compose.yaml                # the API + a local Ollama, one command
+└── .github/workflows/ci.yml    # lint, typecheck, tests (3.11, 3.12), image build + smoke test
 ```
 
 ## Quickstart
@@ -192,6 +193,17 @@ curl -X POST localhost:8000/ask -H "Content-Type: application/json" \
   -d '{"question": "How do I add validation to a query parameter?"}'
 ```
 
+**On Windows PowerShell**, every command above works as-is except the `curl` call:
+there, `curl` is an alias of `Invoke-WebRequest` and `\` doesn't continue a line. Use
+`Invoke-RestMethod` instead; building the body from a hashtable avoids quoting issues,
+and the other `curl` examples in this README translate the same way:
+
+```powershell
+$body = @{ question = "How do I add validation to a query parameter?" } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri http://localhost:8000/ask `
+  -ContentType "application/json" -Body $body | ConvertTo-Json -Depth 5
+```
+
 Generation defaults to a **local Ollama model**: have Ollama running with an
 instruction-following model pulled (e.g. `ollama pull qwen2.5:7b-instruct`; tool
 calling isn't needed). Without Ollama or a cloud key, `/ask` returns a 502 at the
@@ -201,19 +213,37 @@ Azure OpenAI and OpenAI are configured through [.env.example](.env.example).
 On Linux/macOS/WSL, the [Makefile](Makefile) provides shorter aliases
 (`make build`, `make eval`, `make api`, `make test`); CI calls `uv` directly.
 
-### Option B — Docker
+### Option B — Docker Compose (API + Ollama)
+
+```bash
+docker compose up --build
+```
+
+Starts the API on port 8000 next to an Ollama container. The first start pulls
+`qwen2.5:7b-instruct` (~4.7GB) into a named volume. The LLM runs on CPU unless you
+uncomment the GPU block in [compose.yaml](compose.yaml). `.env` is passed to the API, so
+Azure OpenAI credentials set there take priority over Ollama; plain OpenAI also needs
+`LOCAL_LLM_BASE_URL` emptied in `compose.yaml`, which points it at the Ollama container.
+
+### Option C — Docker, with Ollama on the host
 
 ```bash
 docker build -f docker/Dockerfile -t doc-qa-agent .
 docker run -p 8000:8000 \
+  --add-host=host.docker.internal:host-gateway \
   -e LOCAL_LLM_BASE_URL=http://host.docker.internal:11434/v1 \
   doc-qa-agent
 ```
 
-The image builds both Chroma collections and downloads both models at build time,
-so at runtime the container only needs network to reach the LLM.
-`host.docker.internal` points to an Ollama running on the host; pass the
-Azure/OpenAI variables from [.env.example](.env.example) to use a cloud model instead.
+`--add-host` makes `host.docker.internal` resolve on Linux too (Docker Desktop defines it
+already). Pass the Azure/OpenAI variables from [.env.example](.env.example), or the whole
+file with `--env-file .env`, to use a cloud model instead.
+
+The image builds both Chroma collections and downloads both models at build time, and
+runs with `HF_HUB_OFFLINE=1`: at runtime the container only needs network to reach the
+LLM (CI checks this by running it with `--network none`). On Linux, torch comes from
+PyTorch's CPU index (see `[tool.uv.sources]` in `pyproject.toml`), which keeps the
+several GB of CUDA libraries out of the image.
 
 ## Corpus
 
@@ -236,6 +266,10 @@ curated set of advanced-guide pages — from the docs *source* of the
 - `/// tip` and `/// note` admonitions become blockquotes.
 - `<div class="termy">` terminal wrappers are stripped, keeping the code block inside.
 - `{ #anchor-id }` suffixes are stripped from headings.
+
+A page or snippet that fails to download is listed in the manifest (`failed_pages`,
+`failed_snippets`) and makes `fetch` exit with status 1, so a refresh can't silently
+produce a corpus missing its code examples.
 
 ## Ingestion & chunking
 
@@ -299,8 +333,9 @@ ranking second in both lists (2/62) beats ranking first in only one (1/61).
 - **Each side contributes 20 candidates** (`config.hybrid_candidates`), not `top_k`,
   so BM25 can surface passages the dense search missed entirely. The fused list is
   then truncated to `top_k`.
-- **The BM25 index is built in memory from Chroma** (`ChunkStore.get_all()`) when a
-  hybrid retriever is constructed — no second artifact to persist or keep in sync.
+- **The BM25 index is built in memory from Chroma** (`LexicalIndex.from_store`, over
+  `ChunkStore.get_all()`) — no second artifact to persist or keep in sync. The API builds
+  it once per collection at startup and shares it between `hybrid` and `hybrid_rerank`.
 - **Tokenization is plain**: lowercase, no stemming, no stop words; `[a-z0-9_]+`
   keeps `response_model_exclude_unset` as one token.
 
@@ -308,15 +343,16 @@ ranking second in both lists (2/62) beats ranking first in only one (1/61).
 
 RRF can say which candidate is best, never whether the best is any good: an
 off-topic question still gets a confidently ordered top 5. `hybrid_rerank` re-scores
-the fused candidates with `cross-encoder/ms-marco-MiniLM-L-6-v2`, which reads
+the top 20 fused candidates (`config.rerank_candidates`) with
+`cross-encoder/ms-marco-MiniLM-L-6-v2`, then keeps the best `top_k`. The model reads
 question and passage together — more accurate than comparing two independent
 vectors, but too slow for the whole corpus, hence its place after cheap retrieval.
 
-The checkpoint outputs unbounded logits (−11.4 to +8.6 on this corpus);
-`rerank.py` applies a sigmoid so scores land in [0, 1]. The ranking is unchanged,
-but a threshold now means the same thing **from one question to the next** — which
-holds for neither cosine nor RRF scores (a passage ranked first by both retrievers
-scores 2/61 whether or not it answers anything).
+The checkpoint outputs unbounded logits (−11.5 to +8.6 over every candidate scored for
+the 48 eval questions); `rerank.py` applies a sigmoid so scores land in [0, 1]. The
+ranking is unchanged, but a threshold now means the same thing **from one question to
+the next** — which holds for neither cosine nor RRF scores (a passage ranked first by
+both retrievers scores 2/61 whether or not it answers anything).
 
 Candidates below `config.rerank_min_score` (**0.2**, chosen in
 [Evaluation](#evaluation)) are dropped; when none clears it, retrieval returns
@@ -395,7 +431,8 @@ Disabling the floor (`min_rerank_score=0.0`) separates the two causes:
 | + cross-encoder re-ordering (floor off) | 0.5789 | 0.9737 | 0.8026 |
 | + relevance floor at 0.2 | 0.5632 | 0.9737 | 0.8026 |
 
-- **Re-ordering causes all of the MRR loss and most of the recall loss.** Even reading
+- **Re-ordering causes all of the MRR loss and most of the recall loss** (all of it on
+  markdown; on fixed, 0.9737 → 0.9342 of the total drop to 0.9211). Even reading
   whole passages, the cross-encoder, trained on MS MARCO web passages, is judging API
   prose full of code and identifiers — a domain shift a 22M-parameter model absorbs
   poorly. A FastAPI-tuned re-ranker might well reverse the result.
@@ -523,12 +560,15 @@ uv run uvicorn api.app:app --reload --port 8000
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /ask` | `{"question": str, "top_k": int = 5, "strategy": "fixed" \| "markdown" = "markdown", "mode": "dense" \| "hybrid" \| "hybrid_rerank" = "hybrid"}` → `{question, answer, citations, passages, groundedness_score, abstained}` |
+| `POST /ask` | `{"question": str (non-empty), "top_k": int in 1–20 = 5, "strategy": "fixed" \| "markdown" = "markdown", "mode": "dense" \| "hybrid" \| "hybrid_rerank" = "hybrid"}` → `{question, answer, citations, passages, groundedness_score, abstained}` |
 | `GET /health` | Liveness check |
 
 An abstention is a normal `200`: `abstained: true`, empty `passages` and a refusal
-in `answer`. Only `hybrid_rerank` produces one. A question too long for the embedding model's
-window is rejected with a `422` rather than silently truncated. There is no frontend.
+in `answer`. Only `hybrid_rerank` produces one. An empty question, or one too long for the
+embedding model's window, is rejected with a `422` rather than silently truncated. A failure
+of the LLM provider (unreachable, timeout, error status) is a `502`; any other error is a
+generic `500`. Neither response body carries the underlying message, which goes to the
+server log. There is no frontend.
 
 ### Example
 
@@ -617,7 +657,7 @@ something the model may or may not do on a given question.
 ## Testing & quality gates
 
 ```bash
-uv run pytest                        # 172 tests
+uv run pytest                        # 185 tests
 uv run pytest -m "not integration"   # skip the real-model tests
 uv run ruff check src tests eval
 uv run ruff format --check src tests eval
@@ -631,12 +671,19 @@ uv run mypy src tests eval
 - **One integration file.** `tests/test_integration.py` (marker `integration`) loads
   the real embedder and cross-encoder (downloaded on first run) and checks only what
   the code relies on: re-rank scores in [0, 1], topical ranking and the 512-token
-  guards. One test also
-  queries the built `data/chroma` store and is skipped if it doesn't exist.
+  guards. One test also queries the built `data/chroma` store and is skipped if it
+  doesn't exist.
 - **Coverage: 99%** of `src/` and `eval/`; the 6 uncovered statements are the
   `main()` / `__main__` entry points of the three CLIs.
 - **CI** ([ci.yml](.github/workflows/ci.yml)), on pushes and pull requests to `main`:
-  lint, format check, mypy, vector store build, then the full suite with coverage.
+  - lint, format check and mypy;
+  - on Python 3.11 and 3.12: vector store build, then the full suite, failing under 98%
+    coverage;
+  - the Docker image built and smoke-tested offline: `/health`, then an `/ask` that must
+    abstain.
+
+  uv packages and the Hugging Face models are cached between runs. A `v*` tag also
+  publishes the image to GHCR, once every job has passed.
 
 ## Technical choices
 
@@ -657,19 +704,21 @@ uv run mypy src tests eval
 | Packaging | uv | One fast tool for environments, installs and scripts on every OS. |
 
 **Design notes**
-- **Corpus committed, vector store not.** `data/raw/` (~752KB of Markdown) makes the
+- **Corpus committed, vector store not.** `data/raw/` (~600KB of Markdown) makes the
   eval reproducible offline; `data/chroma/` (~17MB) is derived and gitignored.
 - **One pipeline scores every configuration.** `run_all` loops over
   `ChunkingStrategy` × `RetrievalMode` and calls `evaluate_question` identically, so
   adding `hybrid_rerank` required no scoring change.
 - **Modes are fixed per `Retriever`.** A `dense` retriever builds no BM25 index and
   only `hybrid_rerank` uses the cross-encoder; the API builds all six retrievers at
-  startup, sharing one embedder and one re-ranker.
+  startup, sharing one embedder and one re-ranker, plus one store and one BM25 index
+  per collection.
 
 ## Out of scope
 
-No frontend, query rewriting, authentication or deployment infrastructure. Hybrid
-search and re-ranking both started on this list and left it the same way: built,
+No frontend, query rewriting, authentication or deployment infrastructure beyond the
+Docker image and the local `compose.yaml`. Hybrid search and re-ranking both started
+on this list and left it the same way: built,
 measured, then placed according to the numbers — hybrid as the default, re-ranking
 as an opt-in mode.
 

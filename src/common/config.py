@@ -16,7 +16,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 class DocQAConfig(BaseSettings):
     """Environment-overridable settings. Prefix: DOCQA_."""
 
-    model_config = SettingsConfigDict(env_prefix="DOCQA_", env_file=".env", extra="ignore")
+    # Anchored at the project root, like `generation/llm.py`, so the working directory doesn't matter.
+    model_config = SettingsConfigDict(
+        env_prefix="DOCQA_", env_file=PROJECT_ROOT / ".env", extra="ignore"
+    )
 
     # --- Corpus ------------------------------------------------------
     raw_docs_dir: Path = PROJECT_ROOT / "data" / "raw"
